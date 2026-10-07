@@ -1,0 +1,5 @@
+0.0900
+0.999985752 1.8523e-07
+# SiO2, fused silica / glass, 2.20 g/cm³ — row 1: neutron potential V (µeV), row 2: X-ray ε = real imaginary
+# V: the program's original substrate value (SLD ≈ 3.47e-6 Å⁻²).
+# ε at Cu Kα1 (8.048 keV): f′/f″ Si 0.2541/0.3302, O 0.0492/0.0322 (International Tables). θc = 0.216°

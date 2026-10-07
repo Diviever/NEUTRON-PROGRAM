@@ -1,0 +1,7 @@
+0.2102
+0.999949133 1.7024e-06
+# Ni80Mo20 (atomic %), non-polarizing NiMo — row 1: neutron potential V (µeV), row 2: X-ray ε = real imaginary
+# Density 9.25 g/cm³ estimated from additive atomic volumes (Ni 8.908, Mo 10.22 g/cm³); n = 0.0843 atoms/Å³.
+# V from b_Ni = 10.3 fm, b_Mo = 6.715 fm: SLD 8.07e-6 Å⁻² (neutron q_c = 0.0201 Å⁻¹).
+# ε at Cu Kα1 (8.048 keV): f′/f″ Ni −3.0029/0.5091, Mo −0.1647/2.7103 (International Tables). X-ray θc = 0.409°.
+# If 80/20 is meant in weight %: Ni0.867Mo0.133 at., 9.14 g/cm³, V = 0.2213, ε = 0.999949844 1.4755e-06.

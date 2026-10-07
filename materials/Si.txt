@@ -1,0 +1,5 @@
+0.0540
+0.999984846 3.5104e-07
+# Si — row 1: neutron potential V (µeV), row 2: X-ray permittivity ε = real imaginary
+# V from b = 4.1491 fm and density 2.329 g/cm³ (SLD 2.07e-6 Å⁻²).
+# ε at Cu Kα1 (8.048 keV): f′ = 0.2541, f″ = 0.3302 (International Tables Vol. C). θc = 0.223°

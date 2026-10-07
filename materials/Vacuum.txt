@@ -1,0 +1,3 @@
+0.0
+1.0 0.0
+# Vacuum — row 1: neutron potential V (µeV), row 2: X-ray permittivity ε = real imaginary

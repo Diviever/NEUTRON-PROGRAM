@@ -1,0 +1,6 @@
+0.2259
+0.999949878 1.4067e-06
+# Ni(Mo) alloy 83/17 wt% (Ni0.889 Mo0.111 at.) — row 1: neutron potential V (µeV), row 2: X-ray ε = real imaginary
+# V from the measured SLD 8.675e-6 Å⁻² of a sputtered Ni(Mo) 83/17 wt% film (arXiv:2503.22561, nominal 8.26e-6 -> 0.2151 µeV).
+# Density implied by that SLD (b_Ni = 10.3 fm, b_Mo = 6.715 fm): 9.14 g/cm³.
+# ε at Cu Kα1 (8.048 keV) with that density, f′/f″: Ni −3.0029/0.5091, Mo −0.1647/2.7103 (International Tables). θc = 0.406°

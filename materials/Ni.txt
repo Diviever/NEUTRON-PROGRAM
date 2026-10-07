@@ -1,0 +1,5 @@
+0.2410
+0.999951363 9.9055e-07
+# Ni — row 1: neutron potential V (µeV), row 2: X-ray permittivity ε = real imaginary
+# V: the program's original Ni value. ε at Cu Kα1 (λ = 1.540562 Å, 8.048 keV): ε = (1 − δ + iβ)²,
+# δ, β from density 8.908 g/cm³ and f′ = −3.0029, f″ = 0.5091 (International Tables Vol. C). θc = 0.400°
