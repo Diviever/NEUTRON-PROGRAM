@@ -2,7 +2,7 @@
 gui.py — user interface (PyQt5/PyQt6 + embedded matplotlib)
 
     PARAMETERS      table of every adjustable number: label, start value, limits, where it is shown
-    DropZone        area that accepts a dragged .xlsx structure file
+    DropZone        area that accepts a dragged file (.xlsx structure, .xy measured curve)
     LayerCard       the entries of ONE Material object; typing changes the material directly
     MultilayerApp   main window: holds self.materials (list of Material), shows R(q) and V(z),
                     runs the optimizer loop in the program itself
@@ -10,7 +10,12 @@ gui.py — user interface (PyQt5/PyQt6 + embedded matplotlib)
 Data flow:
     entries  ->  Material objects  ->  build_stack()  ->  neutron_reflectivity() / xray_reflectivity()  ->  plots
     optimizer changes the same Material objects  ->  show_material() puts the numbers back in the entries
+    measured .xy curves  ->  read_xy()  ->  x converted to q with the beam's k  ->  points on the R(q) plots
+
+Colors: `colors` holds the plot colors of the current theme (light / dark, see gui_style.py);
+apply_theme() switches it together with the Qt stylesheet.
 """
+from pathlib import Path
 import time
 
 import numpy as np
@@ -24,6 +29,7 @@ try:
         QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView, QFileDialog, QAbstractItemView
     )
     from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+    from PyQt6.QtGui import QIcon, QPalette, QColor
 except ImportError:
     from PyQt5.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
@@ -32,6 +38,7 @@ except ImportError:
         QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView, QFileDialog, QAbstractItemView
     )
     from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+    from PyQt5.QtGui import QIcon, QPalette, QColor
 
 import matplotlib
 matplotlib.use('QtAgg')
@@ -48,8 +55,9 @@ from calculation import (Material, Interface, build_stack, neutron_reflectivity,
                          energy_from_k, k_from_energy, glancing_angle, q_from_angle, H_OVER_M,
                          xray_wavelength, xray_energy)
 from optimizer import M_REFERENCE, reference_for_m, hayter_mook_start, GradientDescent, optimize
-from gui_style import LAYER_COLORS
-from structure_file import LIBRARY_DIR, load_library, sheet_names, read_layers, periodic_materials, read_thickness_file
+from gui_style import THEMES
+from structure_file import (LIBRARY_DIR, load_library, sheet_names, read_layers, periodic_materials,
+                            read_thickness_file, read_xy)
 
 MAX_DEGREE = 6
 
@@ -62,6 +70,8 @@ EPS_NI = 0.999951363 + 9.9055e-07j
 EPS_TI = 0.999973185 + 2.1806e-06j
 EPS_SIO2 = 0.999985752 + 1.8523e-07j
 SUPERSCRIPT = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
+CURVE_FILES = (".xy", ".dat", ".txt", ".csv")             # measured curves; .xy is what Multifitting writes
+colors = dict(THEMES["light"])                            # plot colors of the current theme (apply_theme changes it)
 
 
 # ==============================================================================
@@ -83,21 +93,44 @@ def qenum(owner, group, name):
     return getattr(owner, name)
 
 
-def xlsx_path(event):
-    """Path of the first .xlsx file in a drag-and-drop event, or None."""
+def dropped_path(event, extensions=(".xlsx",)):
+    """Path of the first file with one of these extensions in a drag-and-drop event, or None."""
+    if not event.mimeData().hasUrls():
+        return None
     for url in event.mimeData().urls():
         path = url.toLocalFile()
-        if path.lower().endswith(".xlsx"):
+        if path.lower().endswith(tuple(extensions)):
             return path
     return None
 
 
+def program_icon():
+    """The program icon: icon.png (made from icon.svg) next to this file, else icon.svg itself."""
+    folder = Path(__file__).resolve().parent
+    for name in ("icon.png", "icon.ico", "icon.svg"):
+        if (folder / name).exists():
+            return QIcon(str(folder / name))
+    return QIcon()
+
+
+def style_axes(ax, background):
+    """Theme colors on one plot: background (None = keep), frame, ticks, title and axis labels."""
+    if background is not None:
+        ax.set_facecolor(background)
+    for spine in ax.spines.values():
+        spine.set_color(colors["edge"])
+    ax.tick_params(which="both", colors=colors["text"])
+    for text in (ax.title, ax.xaxis.label, ax.yaxis.label):
+        text.set_color(colors["text"])
+
+
 class DropZone(QLabel):
-    """Area that accepts a dragged .xlsx file and reports its path."""
+    """Area that accepts a dragged file with one of the given extensions and reports its path."""
     file_dropped = pyqtSignal(str)
 
-    def __init__(self, text):
+    def __init__(self, text, extensions=(".xlsx",)):
         super().__init__(text)
+        self.extensions = extensions
         self.setObjectName("DropZone")
         self.setAcceptDrops(True)
         self.setWordWrap(True)
@@ -105,7 +138,7 @@ class DropZone(QLabel):
         self.setMinimumHeight(70)
 
     def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls() and xlsx_path(event):
+        if dropped_path(event, self.extensions):
             event.acceptProposedAction()
         else:
             event.ignore()
@@ -114,7 +147,7 @@ class DropZone(QLabel):
         self.dragEnterEvent(event)
 
     def dropEvent(self, event):
-        path = xlsx_path(event)
+        path = dropped_path(event, self.extensions)
         if path:
             event.acceptProposedAction()
             self.file_dropped.emit(path)
@@ -154,9 +187,9 @@ class LayerCard(QFrame):
 
         # ---- header: name, potential, mode, remove ----
         head = QHBoxLayout()
-        swatch = QLabel("■")
-        swatch.setStyleSheet(f"color: {color}; font-size: 13pt; background: transparent;")
-        head.addWidget(swatch)
+        self.swatch = QLabel("■")
+        self.swatch.setStyleSheet(f"color: {color}; font-size: 13pt; background: transparent;")
+        head.addWidget(self.swatch)
         head.addWidget(QLabel("Material:"))
         self.ed_name = QLineEdit()
         self.ed_name.setMaximumWidth(80)
@@ -262,7 +295,7 @@ class LayerCard(QFrame):
         self.pages.addWidget(user_page)
         body.addWidget(self.pages, 1)
 
-        self.fig = Figure(figsize=(2.5, 1.6), dpi=80, facecolor='#ffffff')
+        self.fig = Figure(figsize=(2.5, 1.6), dpi=80, facecolor=colors["card_plot"])
         self.canvas = MiniCanvas(self.fig)
         self.canvas.setFixedSize(240, 150)
         self.ax = self.fig.add_subplot(111)
@@ -270,7 +303,7 @@ class LayerCard(QFrame):
         outer.addLayout(body)
 
         self.lbl_warn = QLabel("")
-        self.lbl_warn.setStyleSheet("color: #cf222e; font-weight: bold; background: transparent;")
+        self.lbl_warn.setStyleSheet(f"color: {colors['warning']}; font-weight: bold; background: transparent;")
         outer.addWidget(self.lbl_warn)
 
         # ---- connections ----
@@ -282,6 +315,14 @@ class LayerCard(QFrame):
         self.btn_remove.clicked.connect(lambda: self.remove_requested.emit(self))
 
         self.show_material()
+
+    def set_color(self, color):
+        """New line color (after a theme change) and redraw."""
+        self.color = color
+        self.swatch.setStyleSheet(f"color: {color}; font-size: 13pt; background: transparent;")
+        self.lbl_warn.setStyleSheet(f"color: {colors['warning']}; font-weight: bold; background: transparent;")
+        self.fig.set_facecolor(colors["card_plot"])
+        self.draw_graph()
 
     # ---- entries -> material ----
     def read_entries(self, *_):
@@ -363,7 +404,7 @@ class LayerCard(QFrame):
         negative = int(np.sum(d < 0))
         missing = int(np.sum(d == 0))
         if negative:
-            self.ax.axhline(0.0, color='#cf222e', lw=0.8, ls='--')
+            self.ax.axhline(0.0, color=colors["warning"], lw=0.8, ls='--')
             self.lbl_warn.setText(f"⚠ d < 0 in {negative} of {N} periods — those layers are left out")
         self.lbl_warn.setVisible(negative > 0)
         title = f"{self.material.name or '—'}: {d.min():.1f} … {d.max():.1f} Å"
@@ -373,7 +414,8 @@ class LayerCard(QFrame):
         self.ax.set_xlabel("period  (1 = top)", fontsize=7, labelpad=1)
         self.ax.set_ylabel("d (Å)", fontsize=7, labelpad=1)
         self.ax.tick_params(labelsize=6.5, length=2, pad=1)
-        self.ax.grid(True, ls='--', alpha=0.4, lw=0.6)
+        self.ax.grid(True, ls='--', alpha=0.4, lw=0.6, color=colors["grid"])
+        style_axes(self.ax, colors["card_plot"])
         try:
             self.fig.tight_layout(pad=0.4)
         except Exception:
@@ -414,12 +456,19 @@ PARAMETERS = [
     ("xq_points",      "X-ray q points",             3000,           100,     100000,   100,     0,   "xray",      "Number of q values of the X-ray curve"),
 
     ("q_min",          "q min (Å⁻¹)",                0.001,          1e-4,    0.1,      0.001,   4,   "plot",      "Lowest q of the calculation grid"),
-    ("q_max_factor",   "q max / (m·q_c)",            1.3,            1.0,     5.0,      0.1,     2,   "plot",      "Highest q of the grid, as a multiple of the target edge m·q_c"),
+    ("q_max_factor",   "q max / (m·q_c)",            1.3,            1.0,     50.0,     0.1,     2,   "plot",      "Highest q of the grid, as a multiple of the target edge m·q_c"),
     ("q_points",       "q points",                   800,            50,      20000,    50,      0,   "plot",      "Number of q values (plots and optimizer use the same grid)"),
     ("edge_fraction",  "Edge window from (× m·q_c)", 0.95,           0.5,     0.999,    0.01,    3,   "plot",      "'R near m·q_c' = mean R between this fraction of m·q_c and m·q_c"),
     ("R_scale",        "R axis",                     ("log", "linear"), None, None,   None,    None, "plot",      "Reflectivity axis: logarithmic or linear"),
     ("log_decades",    "Log range (decades)",        9,              1,       30,       1,       0,   "plot",      "Log axis: R is shown from its maximum down to its minimum, but at most this many decades"),
     ("z_pad",          "Vacuum / substrate shown (Å)", 50.0,         0.0,     10000.0,  10.0,    0,   "plot",      "Width of vacuum and substrate drawn in the V(z) plot"),
+    ("theme",          "Theme",                      ("light", "dark"), None, None,   None,    None, "plot",      "Colors of the whole program and the plots; dark uses the colors of the program icon"),
+
+    ("xray_unit",      "X-ray file: column 1 is",    ("θ (°)", "2θ (°)", "q (Å⁻¹)", "q (nm⁻¹)"), None, None, None, None, "data", "Meaning of the first column; θ and 2θ are turned into q with the X-ray wavelength λ"),
+    ("neutron_unit",   "Neutron file: column 1 is",  ("θ (°)", "2θ (°)", "q (Å⁻¹)", "q (nm⁻¹)"), None, None, None, None, "data", "Meaning of the first column; θ and 2θ are turned into q with the neutron k"),
+    ("xray_factor",    "X-ray points × factor",      1.0,            1e-9,    1e9,      0.1,     4,   "data",      "The measured intensities are multiplied by this (after the normalization)"),
+    ("neutron_factor", "Neutron points × factor",    1.0,            1e-9,    1e9,      0.1,     4,   "data",      "The measured intensities are multiplied by this (after the normalization)"),
+    ("data_norm",      "Normalize measured",         ("max = 1", "as it is"), None, None, None, None, "data", "max = 1: counts are divided by their maximum, so they compare with R; as it is: the numbers of the file"),
 
     ("m",              "m",                          2.0,            1.01,    10.0,     0.1,     2,   "target",    "High reflectivity is wanted for 0 < q ≤ m·q_c"),
     ("target",         "Target ⟨R⟩",                 0.92,           0.05,    1.0,      0.005,   3,   "target",    "The search stops when ⟨R⟩ over (0, m·q_c] reaches this (filled from the reference table)"),
@@ -450,11 +499,12 @@ GROUP_TITLES = {
     "beam":      "Neutron beam",
     "xray":      "X-ray beam",
     "plot":      "q grid & plots",
+    "data":      "Measured curves to compare (.xy as Multifitting writes it: column 1 = θ, 2θ or q, column 2 = intensity)",
     "target":    "Supermirror target",
     "search":    "Search",
     "advanced":  "Advanced optimizer settings",
 }
-REDRAW_GROUPS = ("structure", "interface", "beam", "xray", "plot", "target")     # changing these recalculates the plots
+REDRAW_GROUPS = ("structure", "interface", "beam", "xray", "plot", "data", "target")     # changing these recalculates the plots
 
 
 # ==============================================================================
@@ -464,6 +514,7 @@ class MultilayerApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Neutron Multilayer Reflectivity Designer")
+        self.setWindowIcon(program_icon())
         self.resize(1650, 900)
 
         self.materials = []                                  # list of Material — the structure
@@ -474,6 +525,8 @@ class MultilayerApp(QMainWindow):
         self.running = False                                 # True while the optimizer loop runs
         self.mean_R = 0.0                                    # ⟨R⟩ of the structure shown in the plot
         self.calc_seconds = 0.0                              # duration of the last plot update
+        self.measured = {"xray": None, "neutron": None}      # measured curves: (file name, x[], y[]) or None
+        self.native_style = QApplication.style().objectName() or "Fusion"   # Qt style of the light theme (the system one)
 
         # recalculate 150 ms after the last change (not on every keystroke)
         self.calc_timer = QTimer(self)
@@ -522,9 +575,11 @@ class MultilayerApp(QMainWindow):
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        self.fig = Figure(figsize=(8, 8), dpi=100, facecolor='#ffffff')
+        self.fig = Figure(figsize=(8, 8), dpi=100, facecolor=colors["figure"])
         self.canvas = FigureCanvas(self.fig)
-        right_layout.addWidget(NavigationToolbar(self.canvas, self))
+        self.right_layout = right_layout
+        self.toolbar = NavigationToolbar(self.canvas, self)
+        right_layout.addWidget(self.toolbar)
         right_layout.addWidget(self.canvas)
         self.ax_n = self.fig.add_subplot(2, 2, 1)    # neutron R(q)
         self.ax_x = self.fig.add_subplot(2, 2, 2)    # X-ray R(q)
@@ -544,6 +599,7 @@ class MultilayerApp(QMainWindow):
             self.params[key].valueChanged.connect(lambda *_: self.on_m_changed(self.v("m")))
         self.params["file_order"].currentIndexChanged.connect(lambda *_: self.load_sheet())
         self.params["file_sigma"].valueChanged.connect(lambda *_: self.load_sheet())
+        self.params["theme"].currentIndexChanged.connect(lambda *_: self.apply_theme())
         self.setAcceptDrops(True)                            # an .xlsx can be dropped anywhere on the window
         self.reload_library()
         for key, label, start, lo, hi, step, dec, group, tip in PARAMETERS:
@@ -556,6 +612,7 @@ class MultilayerApp(QMainWindow):
         self.add_material(Material("Ni", 0.2410, linear=(40.0, 200.0), epsilon=EPS_NI, sigma=3.0))
         self.add_material(Material("Ti", -0.0490, linear=(40.0, 200.0), epsilon=EPS_TI, sigma=3.0))
         self.on_m_changed(self.v("m"))
+        self.apply_theme()
         QTimer.singleShot(50, self.update_calculation)
 
     # ------------------------------------------------------------------ parameters
@@ -682,6 +739,32 @@ class MultilayerApp(QMainWindow):
         layout.addWidget(box)
         box, _ = self.build_group("plot")
         layout.addWidget(box)
+        box, grid = self.build_group("data")
+        columns = QHBoxLayout()
+        self.data_labels = {}
+        for which, title in (("xray", "X-ray"), ("neutron", "neutron")):
+            column = QVBoxLayout()
+            zone = DropZone(f"Drop the measured {title} curve here (.xy)", CURVE_FILES)
+            zone.setMinimumHeight(55)
+            zone.file_dropped.connect(lambda path, w=which: self.load_measured(w, path))
+            column.addWidget(zone)
+            buttons = QHBoxLayout()
+            for text, action, tip in (("Browse…", self.browse_measured, "Choose the file"),
+                                      ("Fit q range", self.fit_q_to_measured, "Extend the q axis of this plot to the last measured point"),
+                                      ("Clear", self.clear_measured, "Remove the measured points from the plot")):
+                button = QPushButton(text)
+                button.setToolTip(tip)
+                button.clicked.connect(lambda _=False, a=action, w=which: a(w))
+                buttons.addWidget(button)
+            column.addLayout(buttons)
+            label = QLabel("No file.")
+            label.setObjectName("Formula")
+            label.setWordWrap(True)
+            column.addWidget(label)
+            self.data_labels[which] = label
+            columns.addLayout(column)
+        grid.addLayout(columns, grid.rowCount(), 0, 1, 4)
+        layout.addWidget(box)
         layout.addStretch(1)
         return page
 
@@ -760,7 +843,7 @@ class MultilayerApp(QMainWindow):
 
     # ------------------------------------------------------------------ materials
     def add_material(self, material):
-        card = LayerCard(material, self.v("N"), LAYER_COLORS[len(self.cards) % len(LAYER_COLORS)])
+        card = LayerCard(material, self.v("N"), colors["layers"][len(self.cards) % len(colors["layers"])])
         card.changed.connect(self.schedule_update)
         card.remove_requested.connect(self.remove_card)
         card.file_dropped.connect(self.load_card_file)
@@ -889,11 +972,11 @@ class MultilayerApp(QMainWindow):
         self.schedule_update()
 
     def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls() and xlsx_path(event):
+        if dropped_path(event):
             event.acceptProposedAction()
 
     def dropEvent(self, event):
-        path = xlsx_path(event)
+        path = dropped_path(event)
         if path:
             event.acceptProposedAction()
             self.open_structure_file(path)
@@ -923,6 +1006,110 @@ class MultilayerApp(QMainWindow):
 
     def on_xray_wavelength_changed(self, wavelength):
         self.set_v("E_x", xray_energy(wavelength))
+
+    # ------------------------------------------------------------------ measured curves (.xy)
+    def load_measured(self, which, path):
+        """Read a measured curve for the X-ray ('xray') or the neutron ('neutron') plot."""
+        file_name = path.replace("\\", "/").split("/")[-1]
+        try:
+            x, y = read_xy(path)
+        except (OSError, ValueError) as problem:
+            self.data_labels[which].setText(f"⚠ {file_name}: {problem}")
+            return
+        self.measured[which] = (file_name, x, y)
+        self.schedule_update()
+
+    def browse_measured(self, which):
+        path, _ = QFileDialog.getOpenFileName(self, "Measured curve", "",
+                                              "Curves (*.xy *.dat *.txt *.csv);;All files (*)")
+        if path:
+            self.load_measured(which, path)
+
+    def clear_measured(self, which):
+        self.measured[which] = None
+        self.data_labels[which].setText("No file.")
+        self.schedule_update()
+
+    def measured_curve(self, which):
+        """The measured curve as (q[], R[]) on the axes of the plot, or None.
+        Column 1 -> q:  q = 2k·sin θ  (θ = column 1, or column 1 / 2 for 2θ),  or q itself.
+        Column 2 -> R:  divided by its maximum ("max = 1") and multiplied by the factor."""
+        if self.measured[which] is None:
+            return None
+        _, x, y = self.measured[which]
+        k = 2 * np.pi / self.v("lambda_x") if which == "xray" else self.v("k")
+        unit = self.v(f"{which}_unit")
+        if unit == "θ (°)":
+            q = q_from_angle(x, k)
+        elif unit == "2θ (°)":
+            q = q_from_angle(x / 2.0, k)
+        elif unit == "q (Å⁻¹)":
+            q = x
+        else:                                               # q in nm⁻¹
+            q = x / 10.0
+        R = y / y.max() if self.v("data_norm") == "max = 1" and y.max() > 0 else y
+        return q, R * self.v(f"{which}_factor")
+
+    def fit_q_to_measured(self, which):
+        """Extend (or shrink) the q axis of this plot to the last measured point."""
+        curve = self.measured_curve(which)
+        if curve is None:
+            return
+        q_last = float(curve[0].max())
+        if which == "xray":
+            self.params["xq_max"].setValue(np.ceil(q_last * 1000) / 1000)          # rounded up: keeps the last point
+        else:
+            _, q_top, _ = self.target_edge()
+            self.params["q_max_factor"].setValue(np.ceil(q_last / q_top * 100) / 100)
+
+    def show_measured_info(self, which, curve, q_end):
+        """Status line under a drop zone: points, range in the file and in q."""
+        if curve is None:
+            return
+        name, x, _ = self.measured[which]
+        q, R = curve
+        text = (f"{name}: {x.size} points, column 1 = {x.min():g} … {x.max():g} {self.v(which + '_unit')}"
+                f"  →  q = {q.min():.4f} … {q.max():.4f} Å⁻¹, R up to {R.max():.3g}")
+        if q.max() > 1.001 * q_end:
+            text += f"\n⚠ The plot ends at q = {q_end:.4f} Å⁻¹ — press 'Fit q range' to see all points."
+        self.data_labels[which].setText(text)
+
+    # ------------------------------------------------------------------ theme
+    def apply_theme(self):
+        """Light or dark: Qt stylesheet + palette, plot colors, material card colors, plot toolbar icons."""
+        name = self.v("theme")
+        colors.clear()
+        colors.update(THEMES[name])
+        app = QApplication.instance()
+        if colors["palette"]:                               # dark: Fusion style + dark palette
+            app.setStyle("Fusion")
+            palette = QPalette()
+            for role, color in colors["palette"].items():
+                palette.setColor(qenum(QPalette, 'ColorRole', role), QColor(color))
+            disabled = qenum(QPalette, 'ColorGroup', 'Disabled')
+            for role in ("WindowText", "Text", "ButtonText"):
+                palette.setColor(disabled, qenum(QPalette, 'ColorRole', role), QColor(colors["disabled_text"]))
+            app.setPalette(palette)
+        else:                                               # light: the system style and palette
+            app.setStyle(self.native_style)
+            app.setPalette(app.style().standardPalette())
+        app.setStyleSheet(colors["style"])
+
+        matplotlib.rcParams.update({"text.color": colors["text"], "axes.labelcolor": colors["text"],
+                                    "xtick.color": colors["text"], "ytick.color": colors["text"],
+                                    "axes.edgecolor": colors["edge"], "axes.facecolor": colors["axes"],
+                                    "figure.facecolor": colors["figure"], "grid.color": colors["grid"]})
+        self.fig.set_facecolor(colors["figure"])
+        for i, card in enumerate(self.cards):
+            card.set_color(colors["layers"][i % len(colors["layers"])])
+
+        # the toolbar picks light or dark icons when it is made: make it again
+        toolbar = NavigationToolbar(self.canvas, self)
+        self.right_layout.replaceWidget(self.toolbar, toolbar)
+        self.toolbar.setParent(None)
+        self.toolbar.deleteLater()
+        self.toolbar = toolbar
+        self.schedule_update()
 
     # ------------------------------------------------------------------ reference table
     def append_reference_row(self, values):
@@ -1051,27 +1238,32 @@ class MultilayerApp(QMainWindow):
             f"k = {k_x:.4f} Å⁻¹   ·   θ_c {densest.name} = {glancing_angle(q_cx, k_x):.3f}° "
             f"(q_c = {q_cx:.4f} Å⁻¹)   ·   θ at q max = {glancing_angle(q_x[-1], k_x):.2f}°")
 
+        # ---- measured curves converted to q (None when no file is loaded) ----
+        measured_n, measured_x = self.measured_curve("neutron"), self.measured_curve("xray")
+        self.show_measured_info("neutron", measured_n, q[-1])
+        self.show_measured_info("xray", measured_x, q_x[-1])
+
         # ---- neutron R(q) ----
         a = self.ax_n
-        self.draw_reflectivity(a, q, R, k, '#0052cc')
-        a.axvspan(0.0, q_top, color='#1a7f37' if ok else '#bf8700', alpha=0.07, zorder=0,
-                  label=f'target range 0 … m·$q_c$ = {q_top:.4f} Å⁻¹')
-        a.axvline(q_c, color='#e02424', ls='--', lw=1.2, alpha=0.7, label=f'{qc_name} $q_c$ ({q_c:.4f} Å⁻¹)')
-        a.axvline(q_top, color='#1a7f37', ls=':', lw=1.4, label=f'm·$q_c$ (m = {self.m:.2f})')
-        a.hlines(target, 0.0, q_top, colors='#57606a', linestyles='--', lw=1.0, label=f'target ⟨R⟩ = {target:.3f}')
+        self.draw_reflectivity(a, q, R, k, colors["neutron"], measured_n, self.measured["neutron"])
+        a.axvspan(0.0, q_top, color=colors["range_ok"] if ok else colors["range_low"], alpha=colors["range_alpha"],
+                  zorder=0, label=f'target range 0 … m·$q_c$ = {q_top:.4f} Å⁻¹')
+        a.axvline(q_c, color=colors["q_c"], ls='--', lw=1.2, alpha=0.7, label=f'{qc_name} $q_c$ ({q_c:.4f} Å⁻¹)')
+        a.axvline(q_top, color=colors["edge_line"], ls=':', lw=1.4, label=f'm·$q_c$ (m = {self.m:.2f})')
+        a.hlines(target, 0.0, q_top, colors=colors["target"], linestyles='--', lw=1.0, label=f'target ⟨R⟩ = {target:.3f}')
         n_layers = sum(int(np.sum(m.thicknesses(N) > 0)) for m in self.materials)     # layers really in the stack
         a.set_title(f"Neutrons · E = {self.v('energy'):.3f} meV · N = {N} ({n_layers} layers)\n"
                     f"⟨R⟩(0…m·$q_c$) = {self.mean_R:.4f} {'✓' if ok else '✗'} (target {target:.3f})"
                     f"  ·  R near m·$q_c$ ≈ {edge_R:.3f}", fontsize=9, fontweight='bold', pad=6)
-        a.legend(loc='lower left' if self.v("R_scale") == "log" else 'best', fontsize=7, framealpha=0.9)
+        self.draw_legend(a, 'lower left' if self.v("R_scale") == "log" else 'best')
 
         # ---- X-ray R(q) ----
         a = self.ax_x
-        self.draw_reflectivity(a, q_x, R_x, k_x, '#8250df')
-        a.axvline(q_cx, color='#e02424', ls='--', lw=1.2, alpha=0.7, label=f'{densest.name} $q_c$ ({q_cx:.4f} Å⁻¹)')
+        self.draw_reflectivity(a, q_x, R_x, k_x, colors["xray"], measured_x, self.measured["xray"])
+        a.axvline(q_cx, color=colors["q_c"], ls='--', lw=1.2, alpha=0.7, label=f'{densest.name} $q_c$ ({q_cx:.4f} Å⁻¹)')
         a.set_title(f"X-rays · λ = {wavelength:.4f} Å ({self.v('E_x'):.3f} keV), {self.v('polarization')}-polarization\n"
                     f"same structure, ε from the material cards", fontsize=9, fontweight='bold', pad=6)
-        a.legend(loc='upper right', fontsize=7, framealpha=0.9)
+        self.draw_legend(a, 'upper right')
 
         # ---- profiles of the same structure; warn if the slices are thick enough to show their false peak ----
         q_highest = max(q[-1], q_x[-1])
@@ -1081,38 +1273,52 @@ class MultilayerApp(QMainWindow):
         if any_rough and self.v("slice_d") > np.pi / (4 * q_highest):
             slice_warning = (f"\n⚠ d = {self.v('slice_d'):g} Å: false peak at 2π/d = {2 * np.pi / self.v('slice_d'):.3f} Å⁻¹"
                              f" — use d ≤ {np.pi / (4 * q_highest):.1f} Å")
-        self.draw_profile(self.ax_v, potentials, thicknesses, "Potential $V$ (µeV)", '#c81e1e',
+        self.draw_profile(self.ax_v, potentials, thicknesses, "Potential $V$ (µeV)", colors["potential"],
                           f"Neutron potential $V(z)$ ({len(potentials) - 2} slices)"
                           + slice_warning)
-        self.draw_profile(self.ax_e, (1.0 - epsilons.real) * 1e5, thicknesses, "(1 − Re ε) × 10⁵", '#8250df',
+        self.draw_profile(self.ax_e, (1.0 - epsilons.real) * 1e5, thicknesses, "(1 − Re ε) × 10⁵", colors["epsilon"],
                           "X-ray permittivity: 1 − Re ε(z)")
 
         self.fig.tight_layout(pad=1.6)
         self.canvas.draw_idle()
         self.calc_seconds = time.time() - started
 
-    def draw_reflectivity(self, ax, q, R, k, color):
-        """R(q) curve on a log or linear axis, with the glancing angle of this beam (k) on the top axis."""
+    def draw_reflectivity(self, ax, q, R, k, color, measured=None, measured_file=None):
+        """R(q) curve on a log or linear axis, with the glancing angle of this beam (k) on the top axis.
+        measured = (q[], R[]) of a measured curve, drawn as points (None = no file)."""
+        shown = R if measured is None else np.concatenate((R, measured[1]))    # what the y axis must hold
         if self.v("R_scale") == "log":
-            # the axis follows the curve: from the decade above max R down to the decade of min R,
+            # the axis follows the curves: from the decade above max R down to the decade of min R,
             # but at most log_decades decades
-            R_top = max(float(R.max()), 1e-300)
-            R_low = float(R[R > 0].min()) if np.any(R > 0) else R_top
+            R_top = max(float(shown.max()), 1e-300)
+            R_low = float(shown[shown > 0].min()) if np.any(shown > 0) else R_top
             top_decade = np.ceil(np.log10(R_top))
             bottom_decade = max(np.floor(np.log10(R_low)), top_decade - self.v("log_decades"))
-            ax.semilogy(q, np.clip(R, 10.0 ** (bottom_decade - 1), None), color=color, lw=1.4, label='Parratt')
+            ax.set_yscale("log")
+            ax.plot(q, np.clip(R, 10.0 ** (bottom_decade - 1), None), color=color, lw=1.4, label='Parratt', zorder=3)
             ax.set_ylim(10.0 ** bottom_decade, R_top * 1.5)
         else:
-            ax.plot(q, R, color=color, lw=1.4, label='Parratt')
-            ax.set_ylim(0.0, 1.05)
+            ax.plot(q, R, color=color, lw=1.4, label='Parratt', zorder=3)
+            ax.set_ylim(0.0, max(1.05, 1.05 * float(shown.max())))
+        if measured is not None:
+            q_m, R_m = measured
+            keep = R_m > 0 if self.v("R_scale") == "log" else np.isfinite(R_m)   # log axis: no points ≤ 0
+            ax.plot(q_m[keep], R_m[keep], ls='none', marker='o', ms=1.8, color=colors["data"], alpha=0.75,
+                    label=f'measured: {measured_file[0]}', zorder=2)
         ax.set_xlim(0.0, q[-1])
         ax.set_xlabel("Momentum transfer $q$ (Å⁻¹)", fontsize=9)
         ax.set_ylabel("Reflectivity $R$", fontsize=9)
-        ax.grid(True, which="both", ls="--", alpha=0.4)
+        ax.grid(True, which="both", ls="--", alpha=0.4, color=colors["grid"])
+        style_axes(ax, colors["axes"])
         top_axis = ax.secondary_xaxis('top', functions=(lambda x: glancing_angle(x, k),
                                                         lambda th: q_from_angle(th, k)))
         top_axis.set_xlabel("Glancing angle θ (°)", fontsize=8)
         top_axis.tick_params(labelsize=8)
+        style_axes(top_axis, None)
+
+    def draw_legend(self, ax, location):
+        ax.legend(loc=location, fontsize=7, framealpha=0.9, facecolor=colors["axes"], edgecolor=colors["edge"],
+                  labelcolor=colors["text"])
 
     def draw_profile(self, ax, values, thicknesses, ylabel, color, title):
         """Depth profile of one quantity: each slice drawn from its top edge to its bottom edge."""
@@ -1127,7 +1333,8 @@ class MultilayerApp(QMainWindow):
         ax.set_xlim(edges[0], edges[-1])
         span = values.max() - values.min()
         ax.set_ylim(values.min() - 0.2 * span - 0.01, values.max() + 0.2 * span + 0.01)
-        ax.grid(True, ls="--", alpha=0.4)
+        ax.grid(True, ls="--", alpha=0.4, color=colors["grid"])
+        style_axes(ax, colors["axes"])
 
     # ------------------------------------------------------------------ optimizer
     def set_hayter_mook(self):

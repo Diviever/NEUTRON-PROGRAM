@@ -7,22 +7,28 @@ Files:
                          (values = neutron potentials V or X-ray permittivities ε of the same structure)
                     2.1  neutron_reflectivity(potentials, thicknesses, q)                -> R(q), neutrons
                     2.2  xray_reflectivity(epsilons, thicknesses, q, λ, polarization)    -> R(q), X-rays
-  structure_file.py  material library (materials/<Name>.txt: row 1 V in µeV, row 2 ε real imaginary)
-                     and .xlsx structure files (column A material, column B thickness in nm)
+  structure_file.py  material library (materials/<Name>.txt: row 1 V in µeV, row 2 ε real imaginary),
+                     .xlsx structure files (column A material, column B thickness in nm)
+                     and measured curves (.xy: column 1 θ / 2θ / q, column 2 intensity)
   optimizer.py    gradient descent on the Material objects + search over N
   gui.py          window: one card per Material, plots, optimizer controls
-  gui_style.py    stylesheet and colors
+  gui_style.py    light and dark theme: stylesheets and colors
+  icon.svg        program icon (icon.png / icon.ico are made from it; the window uses icon.png)
 """
 import sys
 
-from gui import QApplication, MultilayerApp
-from gui_style import LIGHT_STYLE
+from gui import QApplication, MultilayerApp, program_icon
 
 
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    app.setStyleSheet(LIGHT_STYLE)
+    if sys.platform == "win32":
+        # Own taskbar entry with the program icon (otherwise Windows groups the window under python.exe)
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("NeutronProgram.MultilayerDesigner")
 
-    window = MultilayerApp()
+    app = QApplication(sys.argv)
+    app.setWindowIcon(program_icon())
+
+    window = MultilayerApp()                       # applies the theme chosen in Beams & plots (light at start)
     window.show()
     sys.exit(app.exec() if hasattr(app, 'exec') else app.exec_())

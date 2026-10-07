@@ -7,6 +7,7 @@ structure_file.py — material library and structure files (no GUI code)
     to_periodic(rows)           any layer sequence -> materials in table order + thickness of each in every period
     periodic_materials(...)     those rows -> (list of Material in user mode, number of periods N)
     read_thickness_file(...)    thicknesses of ONE material from a dropped file (for its card)
+    read_xy(path)               measured curve from a Multifitting-style .xy file -> x[], y[]
 
 Every structure becomes periodic: N periods of the materials in table order, each material with its own
 thickness in every period. Example (top first):  Ni 30 nm, Ti 4 nm, Ti 5 nm
@@ -21,6 +22,10 @@ Library file format, one file per material, the file name is the material name (
 
 Structure file (.xlsx): column A = material name, column B = thickness in nm.
 Rows whose column B is not a number (headers such as "Column2" or "Thickness") and empty rows are skipped.
+
+Measured curve (.xy, as Multifitting writes it): two columns per row, x and y, separated by spaces or a tab
+(also ';' or ',' works). Decimal point and decimal comma are both read: "0.00500 262969.0" = "0,00500 262969,0".
+Rows that are not two numbers (headers, comments) are skipped. What x means (θ, 2θ or q) is chosen in the app.
 """
 from pathlib import Path
 
@@ -170,3 +175,22 @@ def read_thickness_file(path, name, first_row_is_top=True):
     if not values:
         raise ValueError("no thicknesses found in the file")
     return values if first_row_is_top else values[::-1]
+
+
+def read_xy(path):
+    """Measured curve from a two-column text file: (x array, y array) in file order. Raises ValueError if empty."""
+    xs, ys = [], []
+    for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
+        parts = line.replace(";", " ").replace("\t", " ").split()
+        if len(parts) == 1 and line.count(",") == 1:      # "0.005,262969" — the comma separates the columns
+            parts = line.split(",")
+        parts = [part.strip(",") for part in parts]       # "0.005, 262969"
+        if len(parts) < 2:
+            continue
+        x, y = parse_number(parts[0]), parse_number(parts[1])
+        if x is not None and y is not None:
+            xs.append(x)
+            ys.append(y)
+    if not xs:
+        raise ValueError("no rows with two numbers")
+    return np.array(xs), np.array(ys)
