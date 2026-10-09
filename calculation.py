@@ -1,8 +1,10 @@
 """
 calculation.py — physics of the multilayer mirror (no GUI code)
 
-    Material                 one material of the repeating unit: name, potential, ε, thickness law
-    Interface                how boundaries are made rough: erf or linear transition, slicing, optional chaos
+    Material                 one material of the repeating unit: name, potential, ε, thickness law,
+                             roughness σ and profile (erf / lin / exp mix) of its upper boundary
+    step_fraction(), reach() the shape of one rough boundary: weighted mix of erf, linear and exponential steps
+    Interface                how the rough boundaries are sliced, optional chaos
     build_stack(...)         METHOD 1:   materials + N + ambient + substrate + interface -> values[], thicknesses[]
                                          (values = neutron potentials V or X-ray permittivities ε of the same structure)
     neutron_reflectivity()   METHOD 2.1: potentials[], thicknesses[], q[]          ->  R(q) for neutrons
@@ -42,6 +44,8 @@ class Material:
     potential  float, µeV — neutron effective potential
     epsilon    complex   — X-ray dielectric permittivity ε = ε' + iε'' at the X-ray energy in use
     sigma      float, Å  — rms roughness of the UPPER boundary of every layer of this material
+    profile    [w_erf, w_lin, w_exp], each 0 … 1 — shape of that boundary: mix of the three steps
+               (see step_fraction; [1, 0, 0] = pure erf, Gaussian roughness)
     mode       "linear", "poly" or "user" — which of the three descriptions gives the thicknesses:
     linear     [d_start, d_end]   thickness (Å) at t = 0 (substrate side) and t = 1 (top side)
     poly       [c0, c1, c2, ...]  d(t) = c0 + c1·t + c2·t² + ...   (Å)
@@ -51,11 +55,13 @@ class Material:
     t is the relative position of a period: t = 1 for the top period, t = 0 for the one on the substrate.
     """
 
-    def __init__(self, name, potential, linear=(50.0, 50.0), degree=4, epsilon=1.0 + 0.0j, sigma=0.0):
+    def __init__(self, name, potential, linear=(50.0, 50.0), degree=4, epsilon=1.0 + 0.0j, sigma=0.0,
+                 profile=(1.0, 0.0, 0.0)):
         self.name = name
         self.potential = float(potential)
         self.epsilon = complex(epsilon)
         self.sigma = float(sigma)
+        self.profile = np.array(profile, dtype=float)       # weights of erf, lin, exp
         self.linear = np.array(linear, dtype=float)
         self.poly = np.zeros(degree + 1)
         self.user = np.zeros(0)
@@ -112,22 +118,64 @@ class Material:
 
 
 # ==============================================================================
-# Interface roughness / interdiffusion
+# Shape of one rough boundary (as in Multifitting, Svechnikov 2020, Eq. 3 and Table 2)
+# ==============================================================================
+PROFILE_NAMES = ("erf", "lin", "exp")
+REACH = (4.0, math.sqrt(3.0), 7.0)          # each step is complete (to ~3·10⁻⁵) at ±REACH·σ
+
+
+def profile_weights(weights):
+    """The weights [erf, lin, exp] made ≥ 0 and normalized to a sum of 1 (all zero -> pure erf)."""
+    w = np.clip(np.asarray(weights, dtype=float), 0.0, None)
+    return w / w.sum() if w.sum() > 0 else np.array([1.0, 0.0, 0.0])
+
+
+def step_fraction(x, sigma, weights):
+    """
+    How far (0 … 1) a boundary of rms width σ has gone at distance x (array, Å) from its centre.
+    All three steps have the same rms width σ; the boundary is their weighted mix:
+
+        erf   ½·(1 + erf(x / √2σ))                       Gaussian roughness, smooth
+        lin   straight ramp from −√3σ to +√3σ            uniform mixing zone
+        exp   ½·exp(√2·x/σ) for x ≤ 0,                   steep in the middle with long tails
+              1 − ½·exp(−√2·x/σ) for x > 0
+
+        F(x) = (w_erf·erf + w_lin·lin + w_exp·exp) / (w_erf + w_lin + w_exp)
+    """
+    w = profile_weights(weights)
+    x = np.asarray(x, dtype=float)
+    F = np.zeros(x.shape)
+    if w[0] > 0:
+        F += w[0] * 0.5 * (1.0 + erf(x / (math.sqrt(2.0) * sigma)))
+    if w[1] > 0:
+        F += w[1] * np.clip(0.5 + x / (math.sqrt(12.0) * sigma), 0.0, 1.0)
+    if w[2] > 0:
+        tail = 0.5 * np.exp(-math.sqrt(2.0) * np.abs(x) / sigma)
+        F += w[2] * np.where(x <= 0, tail, 1.0 - tail)
+    return F
+
+
+def reach(sigma, weights):
+    """Distance from the boundary centre beyond which the mixed step is complete: the widest step used."""
+    w = profile_weights(weights)
+    return sigma * max(r for r, wk in zip(REACH, w) if wk > 0)
+
+
+# ==============================================================================
+# Slicing of the rough boundaries
 # ==============================================================================
 class Interface:
     """
-    How the boundaries of the stack are made rough. The roughness σ itself belongs to the media
-    (as in Multifitting): material.sigma is the rms width of the UPPER boundary of every layer of that
-    material, substrate.sigma the width of the boundary between the last layer and the substrate.
+    How the rough boundaries of the stack are cut into slices. The roughness itself belongs to the media
+    (as in Multifitting): material.sigma and material.profile describe the UPPER boundary of every layer of
+    that material, substrate.sigma / substrate.profile the boundary between the last layer and the substrate.
 
     The nominal layers keep their thicknesses. Only the profile (V or ε) is blurred:
-    the sharp jump at boundary z_b becomes the smooth step  jump · F((z − z_b) / σ_b).
+    the sharp jump at boundary z_b becomes the smooth step  jump · F((z − z_b) / σ_b)  (F = step_fraction).
     Steps of neighbouring boundaries simply add up, i.e. the sharp profile is convolved with
     the roughness distribution. So when σ reaches the layer thickness the contrast between the
     materials fades, and for σ ≫ period the stack becomes the average (fully intermixed) medium.
 
-    profile   "erf"     F = error-function step (Gaussian roughness of rms width σ), complete at ±4σ
-              "linear"  F = straight ramp of width √12·σ (same rms width as the erf), complete at ±√3σ
     slice_thickness   each transition (z_b − reach … z_b + reach) is cut into n = ⌈2·reach / d⌉ equal
               slices of thickness ≤ d (Å). Equal slices act as a grating with a false Bragg peak at
               q = 2π/d, so keep d ≤ π/(4·q_max). A boundary with σ = 0 stays a sharp step (no slices).
@@ -135,25 +183,14 @@ class Interface:
     seed      start of the random numbers — same seed, same structure (reproducible curves and gradients)
     """
 
-    def __init__(self, profile="erf", slice_thickness=2.0, chaos=0.0, seed=1):
-        self.profile = profile
+    def __init__(self, slice_thickness=2.0, chaos=0.0, seed=1):
         self.slice_thickness = float(slice_thickness)
         self.chaos = float(chaos)
         self.seed = int(seed)
 
-    def reach(self, sigma_b):
-        """Distance from the boundary beyond which the transition is complete."""
-        return 4.0 * sigma_b if self.profile == "erf" else math.sqrt(3.0) * sigma_b
-
-    def n_slices(self, sigma_b):
-        """Number of slices across one transition of width σ_b (0 for a sharp boundary)."""
-        return math.ceil(2.0 * self.reach(sigma_b) / self.slice_thickness) if sigma_b > 0 else 0
-
-    def step_fraction(self, x, sigma_b):
-        """How far (0 … 1) the transition has gone at distance x (array, Å) from the boundary."""
-        if self.profile == "erf":
-            return 0.5 * (1.0 + erf(x / (math.sqrt(2.0) * sigma_b)))
-        return np.clip(0.5 + x / (math.sqrt(12.0) * sigma_b), 0.0, 1.0)
+    def n_slices(self, sigma_b, weights):
+        """Number of slices across one transition of width σ_b and this profile (0 for a sharp boundary)."""
+        return math.ceil(2.0 * reach(sigma_b, weights) / self.slice_thickness) if sigma_b > 0 else 0
 
 
 # ==============================================================================
@@ -173,15 +210,15 @@ def build_stack(materials, N, ambient, substrate, interface, quantity="potential
     Both quantities go through the same steps, so neutrons and X-rays see the same structure.
 
     1. Sharp stack: N periods of all materials in list order; period k uses material.thicknesses(N)[k].
-       Every boundary gets the σ of the medium below it. Layers with thickness ≤ 0 (a negative
+       Every boundary gets the σ and profile of the medium below it. Layers with thickness ≤ 0 (a negative
        polynomial, or a material missing from a period of a file structure) are left out.
-    2. Rough stack: every boundary with σ > 0 is blurred (see Interface) and cut into
-       Interface.n_slices(σ) slices; the flat middle of a layer stays one slice.
+    2. Rough stack: every boundary with σ > 0 is blurred (see Interface, step_fraction) and cut into
+       Interface.n_slices(σ, profile) slices; the flat middle of a layer stays one slice.
        Total slices ≈ Σ over boundaries of n_slices + one per layer middle.
     """
     # ---- 1. sharp stack: value of every medium, depth and roughness of every boundary ----
     values = [getattr(ambient, quantity)]
-    boundaries, sigmas = [], []                             # top of each layer (then the substrate) and its σ
+    boundaries, sigmas, shapes = [], [], []                 # top of each layer (then the substrate), its σ and profile
     z = 0.0
     thickness_arrays = [material.thicknesses(N) for material in materials]   # each: N values, top period first
     for period in range(N):                                 # from the ambient side down to the substrate
@@ -190,10 +227,12 @@ def build_stack(materials, N, ambient, substrate, interface, quantity="potential
                 continue
             boundaries.append(z)
             sigmas.append(material.sigma)                   # upper boundary of this layer
+            shapes.append(material.profile)
             values.append(getattr(material, quantity))      # material.potential or material.epsilon
             z += d[period]
     boundaries.append(z)
     sigmas.append(substrate.sigma)
+    shapes.append(substrate.profile)
     values.append(getattr(substrate, quantity))
 
     # ---- 2. rough stack ----
@@ -204,21 +243,21 @@ def build_stack(materials, N, ambient, substrate, interface, quantity="potential
 
     # slice edges: all boundaries + n_slices(σ_b) equal slices across every rough transition
     edges = list(boundaries)
-    for z_b, w in zip(boundaries, widths):
+    for z_b, w, shape in zip(boundaries, widths, shapes):
         if w > 0:
-            r = interface.reach(w)
-            edges.extend(np.linspace(z_b - r, z_b + r, interface.n_slices(w) + 1))
+            r = reach(w, shape)
+            edges.extend(np.linspace(z_b - r, z_b + r, interface.n_slices(w, shape) + 1))
     edges = np.unique(np.round(edges, 6))
     centres = 0.5 * (edges[:-1] + edges[1:])
 
     # value at every slice centre: value_top + Σ jump_b · F((z − z_b)/σ_b)   (sharp boundary: plain step)
     smooth = np.full(centres.size, values[0], dtype=np.result_type(jumps, float))   # float for V, complex for ε
     passed = np.zeros(centres.size + 1, dtype=smooth.dtype) # steps that are complete from slice i on
-    for z_b, w, jump in zip(boundaries, widths, jumps):
-        r = interface.reach(w)
+    for z_b, w, shape, jump in zip(boundaries, widths, shapes, jumps):
+        r = reach(w, shape)
         lo, hi = np.searchsorted(centres, [z_b - r, z_b + r])
         if hi > lo:
-            smooth[lo:hi] += jump * interface.step_fraction(centres[lo:hi] - z_b, w)
+            smooth[lo:hi] += jump * step_fraction(centres[lo:hi] - z_b, w, shape)
         passed[hi] += jump
     smooth += np.cumsum(passed)[:-1]
 

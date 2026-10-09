@@ -51,6 +51,7 @@ except ImportError:
     from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
 
 from calculation import (Material, Interface, build_stack, neutron_reflectivity, xray_reflectivity,
+                         PROFILE_NAMES, profile_weights,
                          critical_q, xray_critical_q, q_grid, mean_reflectivity,
                          energy_from_k, k_from_energy, glancing_angle, q_from_angle, H_OVER_M,
                          xray_wavelength, xray_energy)
@@ -124,6 +125,12 @@ def style_axes(ax, background):
         text.set_color(colors["text"])
 
 
+def mix_text(weights):
+    """'100 % erf' or '70 % erf + 30 % exp': the normalized mix of a boundary profile."""
+    w = profile_weights(weights)
+    return " + ".join(f"{100 * wk:.0f} % {name}" for wk, name in zip(w, PROFILE_NAMES) if wk > 0)
+
+
 class DropZone(QLabel):
     """Area that accepts a dragged file with one of the given extensions and reports its path."""
     file_dropped = pyqtSignal(str)
@@ -172,7 +179,7 @@ class LayerCard(QFrame):
     remove_requested = pyqtSignal(object)
     file_dropped = pyqtSignal(object, str) # (this card, path of an .xlsx with this material's thicknesses)
 
-    def __init__(self, material, n_repeats, color):
+    def __init__(self, material, n_repeats, color, library=None):
         super().__init__()
         self.setObjectName("LayerCard")
         self.setFrameShape(qenum(QFrame, 'Shape', 'StyledPanel'))
@@ -191,9 +198,13 @@ class LayerCard(QFrame):
         self.swatch.setStyleSheet(f"color: {color}; font-size: 13pt; background: transparent;")
         head.addWidget(self.swatch)
         head.addWidget(QLabel("Material:"))
-        self.ed_name = QLineEdit()
-        self.ed_name.setMaximumWidth(80)
-        head.addWidget(self.ed_name)
+        self.cmb_name = QComboBox()                          # library materials; any other name can be typed
+        self.cmb_name.setEditable(True)
+        self.cmb_name.setInsertPolicy(qenum(QComboBox, 'InsertPolicy', 'NoInsert'))
+        self.cmb_name.setMinimumWidth(105)
+        self.cmb_name.setToolTip("Choose a material of the library (fills V and ε), or type any name")
+        self.set_library(library or {})
+        head.addWidget(self.cmb_name)
         head.addWidget(QLabel("V (µeV):"))
         self.ed_pot = QLineEdit()
         self.ed_pot.setMaximumWidth(75)
@@ -222,12 +233,33 @@ class LayerCard(QFrame):
         self.ed_eps_im.setToolTip("Imaginary part (absorption, > 0)")
         eps_row.addWidget(self.ed_eps_im)
         eps_row.addStretch(1)
-        eps_row.addWidget(QLabel("σ upper (Å):"))
-        self.ed_sigma = QLineEdit()
-        self.ed_sigma.setMaximumWidth(60)
-        self.ed_sigma.setToolTip("rms roughness of the upper boundary of every layer of this material (0 = sharp)")
-        eps_row.addWidget(self.ed_sigma)
         outer.addLayout(eps_row)
+
+        # ---- upper boundary of every layer of this material: width σ and shape (mix of erf, lin, exp) ----
+        rough_row = QHBoxLayout()
+        rough_row.addWidget(QLabel("Upper boundary:  σ (Å)"))
+        self.ed_sigma = QLineEdit()
+        self.ed_sigma.setMaximumWidth(55)
+        self.ed_sigma.setToolTip("rms roughness of the upper boundary of every layer of this material (0 = sharp)")
+        rough_row.addWidget(self.ed_sigma)
+        rough_row.addSpacing(10)
+        tips = {"erf": "error-function step: Gaussian roughness, smooth on both sides",
+                "lin": "straight ramp: a uniform mixing zone of width √12·σ",
+                "exp": "exponential step: steep in the middle with long tails"}
+        self.profile_edits = []
+        for name in PROFILE_NAMES:
+            rough_row.addWidget(QLabel(name))
+            entry = QLineEdit()
+            entry.setMaximumWidth(42)
+            entry.setToolTip(f"Weight 0 … 1 of the {tips[name]}. The boundary is the weighted mix of the three "
+                             f"steps (all with the same σ); the weights are divided by their sum.")
+            rough_row.addWidget(entry)
+            self.profile_edits.append(entry)
+        self.lbl_mix = QLabel("")
+        self.lbl_mix.setObjectName("Formula")
+        rough_row.addWidget(self.lbl_mix)
+        rough_row.addStretch(1)
+        outer.addLayout(rough_row)
 
         # ---- body: entries of the two modes (left) + graph (right) ----
         body = QHBoxLayout()
@@ -307,9 +339,11 @@ class LayerCard(QFrame):
         outer.addWidget(self.lbl_warn)
 
         # ---- connections ----
-        for entry in [self.ed_name, self.ed_pot, self.ed_eps_re, self.ed_eps_im, self.ed_sigma,
-                      self.ed_start, self.ed_end, self.ed_user] + self.coef_edits:
+        for entry in [self.ed_pot, self.ed_eps_re, self.ed_eps_im, self.ed_sigma,
+                      self.ed_start, self.ed_end, self.ed_user] + self.profile_edits + self.coef_edits:
             entry.textChanged.connect(self.read_entries)
+        self.cmb_name.editTextChanged.connect(self.read_entries)
+        self.cmb_name.activated.connect(self.on_library_choice)
         self.cmb_mode.currentIndexChanged.connect(self.on_mode_changed)
         self.spin_deg.valueChanged.connect(self.on_degree_changed)
         self.btn_remove.clicked.connect(lambda: self.remove_requested.emit(self))
@@ -324,16 +358,39 @@ class LayerCard(QFrame):
         self.fig.set_facecolor(colors["card_plot"])
         self.draw_graph()
 
+    def set_library(self, library):
+        """Fill the name list with the materials of the library, keeping the name shown."""
+        self.library = library
+        shown = self.cmb_name.currentText()
+        self.cmb_name.blockSignals(True)
+        self.cmb_name.clear()
+        self.cmb_name.addItems(list(library))
+        self.cmb_name.setEditText(shown)
+        self.cmb_name.blockSignals(False)
+
+    def on_library_choice(self, index):
+        """A library material was picked from the list: take its name, V and ε (σ and thicknesses stay)."""
+        name = self.cmb_name.itemText(index)
+        if name not in self.library:
+            return
+        self.material.name = name
+        self.material.potential, self.material.epsilon = self.library[name]
+        self.show_material()
+        self.changed.emit()
+
     # ---- entries -> material ----
     def read_entries(self, *_):
         if self._showing:
             return
         mat = self.material
-        mat.name = self.ed_name.text().strip()
+        mat.name = self.cmb_name.currentText().strip()
         mat.potential = safe_float(self.ed_pot.text(), mat.potential)
         mat.epsilon = complex(safe_float(self.ed_eps_re.text(), mat.epsilon.real),
                               safe_float(self.ed_eps_im.text(), mat.epsilon.imag))
         mat.sigma = max(safe_float(self.ed_sigma.text(), mat.sigma), 0.0)
+        for k, entry in enumerate(self.profile_edits):
+            mat.profile[k] = min(max(safe_float(entry.text(), mat.profile[k]), 0.0), 1.0)
+        self.lbl_mix.setText("= " + mix_text(mat.profile))
         mat.linear[0] = safe_float(self.ed_start.text(), mat.linear[0])
         mat.linear[1] = safe_float(self.ed_end.text(), mat.linear[1])
         for k in range(len(mat.poly)):
@@ -368,11 +425,14 @@ class LayerCard(QFrame):
         mat = self.material
         degree = len(mat.poly) - 1
         self._showing = True
-        self.ed_name.setText(mat.name)
+        self.cmb_name.setEditText(mat.name)
         self.ed_pot.setText(f"{mat.potential:.4f}")
         self.ed_eps_re.setText(f"{mat.epsilon.real:.9f}")
         self.ed_eps_im.setText(f"{mat.epsilon.imag:.4e}")
         self.ed_sigma.setText(f"{mat.sigma:g}")
+        for weight, entry in zip(mat.profile, self.profile_edits):
+            entry.setText(f"{weight:g}")
+        self.lbl_mix.setText("= " + mix_text(mat.profile))
         self.ed_start.setText(f"{mat.linear[0]:.2f}")
         self.ed_end.setText(f"{mat.linear[1]:.2f}")
         page = {"linear": 0, "poly": 1, "user": 2}[mat.mode]
@@ -436,9 +496,11 @@ PARAMETERS = [
     ("eps_vac_im",     "ε_vac imag",                 0.0,            0.0,     0.1,      1e-7,    10,  "structure", "X-ray permittivity of the medium above the mirror (imaginary part)"),
     ("eps_sub_im",     "ε_sub imag",                 EPS_SIO2.imag,  0.0,     0.1,      1e-7,    10,  "structure", "X-ray permittivity of the substrate (imaginary part)"),
     ("N",              "Repetitions N",              30,             1,       20000,    1,       0,   "structure", "How many times the unit cell (all materials) is repeated"),
-    ("sigma_sub",      "σ_sub (Å)",                  3.0,            0.0,     1000.0,   0.5,     2,   "structure", "rms roughness of the substrate surface (boundary between the last layer and the substrate); 0 = sharp"),
 
-    ("profile",        "Profile",                    ("erf", "linear"), None, None,   None,    None, "interface", "erf: Gaussian roughness · linear: straight ramp with the same rms width"),
+    ("sigma_sub",      "Substrate σ (Å)",            3.0,            0.0,     1000.0,   0.5,     2,   "interface", "rms roughness of the substrate surface (boundary between the last layer and the substrate); 0 = sharp"),
+    ("sub_erf",        "Substrate erf",              1.0,            0.0,     1.0,      0.1,     2,   "interface", "Weight 0 … 1 of the error-function step in the substrate boundary"),
+    ("sub_lin",        "Substrate lin",              0.0,            0.0,     1.0,      0.1,     2,   "interface", "Weight 0 … 1 of the linear ramp in the substrate boundary"),
+    ("sub_exp",        "Substrate exp",              0.0,            0.0,     1.0,      0.1,     2,   "interface", "Weight 0 … 1 of the exponential step in the substrate boundary"),
     ("slice_d",        "Slice thickness d (Å)",      2.0,            0.05,    100.0,    0.5,     2,   "interface", "The smooth transitions are cut into slices of at most d. Equal slices act as a grating with a false peak at q = 2π/d: keep d ≤ π/(4·q max)"),
     ("chaos",          "Chaos 0…1",                  0.0,            0.0,     1.0,      0.05,    2,   "interface", "Every boundary gets its own width σ·(1 + chaos·u), u random in [−1, 1]"),
     ("seed",           "Random seed",                1,              0,       999999,   1,       0,   "interface", "Same seed = same random structure (reproducible curves); change it for another realization"),
@@ -494,7 +556,7 @@ PARAMETERS = [
 
 GROUP_TITLES = {
     "structure": "Multilayer",
-    "interface": "Interfaces (roughness: σ of each boundary is set on the material below it)",
+    "interface": "Interfaces (σ and shape of each boundary belong to the medium below it: the cards, the substrate here)",
     "file":      "Structure from a file (.xlsx: column A = material, column B = thickness in nm)",
     "beam":      "Neutron beam",
     "xray":      "X-ray beam",
@@ -843,7 +905,8 @@ class MultilayerApp(QMainWindow):
 
     # ------------------------------------------------------------------ materials
     def add_material(self, material):
-        card = LayerCard(material, self.v("N"), colors["layers"][len(self.cards) % len(colors["layers"])])
+        card = LayerCard(material, self.v("N"), colors["layers"][len(self.cards) % len(colors["layers"])],
+                         self.library)
         card.changed.connect(self.schedule_update)
         card.remove_requested.connect(self.remove_card)
         card.file_dropped.connect(self.load_card_file)
@@ -887,6 +950,8 @@ class MultilayerApp(QMainWindow):
             combo.clear()
             combo.addItems(["— keep the entries —"] + list(self.library))
             combo.blockSignals(False)
+        for card in self.cards:                              # the name lists of the material cards
+            card.set_library(self.library)
 
     def use_library_medium(self, which):
         """Fill V and ε of the ambient or the substrate (Structure tab) from the chosen library material."""
@@ -1163,8 +1228,7 @@ class MultilayerApp(QMainWindow):
 
     def interface(self):
         """Interface object built from the entries of the 'Interfaces' group."""
-        return Interface(profile=self.v("profile"), slice_thickness=self.v("slice_d"),
-                         chaos=self.v("chaos"), seed=self.v("seed"))
+        return Interface(slice_thickness=self.v("slice_d"), chaos=self.v("chaos"), seed=self.v("seed"))
 
     def ambient(self):
         """The medium above the stack as a Material (its σ is not used: the top layer's σ is the surface)."""
@@ -1172,19 +1236,19 @@ class MultilayerApp(QMainWindow):
                         epsilon=complex(self.v("eps_vac_re"), self.v("eps_vac_im")))
 
     def substrate(self):
-        """The substrate as a Material; its σ is the roughness of the last boundary."""
+        """The substrate as a Material; its σ and profile describe the last boundary."""
         return Material("substrate", self.v("V_sub"),
-                        epsilon=complex(self.v("eps_sub_re"), self.v("eps_sub_im")), sigma=self.v("sigma_sub"))
+                        epsilon=complex(self.v("eps_sub_re"), self.v("eps_sub_im")), sigma=self.v("sigma_sub"),
+                        profile=(self.v("sub_erf"), self.v("sub_lin"), self.v("sub_exp")))
 
     def slicing_summary(self, interface):
         """Text: how many slices every kind of boundary gets (before chaos)."""
-        reach = "±4σ" if interface.profile == "erf" else "±√3σ"
-        parts = [f"{m.name or '—'} upper (σ {m.sigma:g} Å): {interface.n_slices(m.sigma) or 'sharp'}"
-                 for m in self.materials]
-        sub = self.v("sigma_sub")
-        parts.append(f"substrate (σ {sub:g} Å): {interface.n_slices(sub) or 'sharp'}")
-        text = (f"Slices per boundary ({interface.profile}: {reach} cut into slices ≤ {interface.slice_thickness:g} Å):  "
-                + "  ·  ".join(parts) + ".  The flat middle of every layer is one more slice.")
+        media = [(f"{m.name or '—'} upper", m) for m in self.materials] + [("substrate", self.substrate())]
+        parts = [f"{name} (σ {m.sigma:g} Å, {mix_text(m.profile)}): {interface.n_slices(m.sigma, m.profile) or 'sharp'}"
+                 for name, m in media]
+        text = (f"Slices per boundary (erf ±4σ, lin ±√3σ, exp ±7σ — the widest step used — cut into slices "
+                f"≤ {interface.slice_thickness:g} Å):  " + "  ·  ".join(parts)
+                + ".  The flat middle of every layer is one more slice.")
         if interface.chaos > 0:
             text += f"  Chaos: every boundary's σ varies by ±{100 * interface.chaos:.0f} %, so these numbers vary too."
         return text
