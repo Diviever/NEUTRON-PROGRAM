@@ -1,5 +1,5 @@
 """
-gui.py — user interface (PyQt5/PyQt6 + embedded matplotlib)
+gui.py — user interface (PyQt5/PyQt6; the plots are drawn by plots.py with pyqtgraph)
 
     PARAMETERS      table of every adjustable number: label, start value, limits, where it is shown
     DropZone        area that accepts a dragged file (.xlsx structure, .xy measured curve)
@@ -12,7 +12,7 @@ Data flow:
     optimizer changes the same Material objects  ->  show_material() puts the numbers back in the entries
     measured .xy curves  ->  read_xy()  ->  x converted to q with the beam's k  ->  points on the R(q) plots
 
-Colors: `colors` holds the plot colors of the current theme (light / dark, see gui_style.py);
+Colors: gui_style.colors holds the colors of the current theme (light / dark);
 apply_theme() switches it together with the Qt stylesheet.
 """
 from pathlib import Path
@@ -40,23 +40,14 @@ except ImportError:
     from PyQt5.QtCore import Qt, QTimer, pyqtSignal
     from PyQt5.QtGui import QIcon, QPalette, QColor
 
-import matplotlib
-matplotlib.use('QtAgg')
-from matplotlib.figure import Figure
-try:
-    from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-    from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
-except ImportError:
-    from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-    from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
-
 from calculation import (Material, Interface, build_stack, neutron_reflectivity, xray_reflectivity,
                          PROFILE_NAMES, profile_weights,
                          critical_q, xray_critical_q, q_grid, mean_reflectivity,
                          energy_from_k, k_from_energy, glancing_angle, q_from_angle, H_OVER_M,
                          xray_wavelength, xray_energy)
 from optimizer import M_REFERENCE, reference_for_m, hayter_mook_start, GradientDescent, optimize
-from gui_style import THEMES
+from gui_style import THEMES, colors
+from plots import PlotPanel, MiniPlot, style_plot, DASH, DOT
 from structure_file import (LIBRARY_DIR, load_library, sheet_names, read_layers, periodic_materials,
                             read_thickness_file, read_xy)
 
@@ -71,8 +62,9 @@ EPS_NI = 0.999951363 + 9.9055e-07j
 EPS_TI = 0.999973185 + 2.1806e-06j
 EPS_SIO2 = 0.999985752 + 1.8523e-07j
 SUPERSCRIPT = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
-CURVE_FILES = (".xy", ".dat", ".txt", ".csv")             # measured curves; .xy is what Multifitting writes
-colors = dict(THEMES["light"])                            # plot colors of the current theme (apply_theme changes it)
+CURVE_FILES = (".xy", ".dat", ".txt", ".csv")
+Q_LABEL = "Momentum transfer <i>q</i> (Å<sup>−1</sup>)"           # axis titles of the plots (HTML)
+Z_LABEL = "Depth <i>z</i> (Å) from the top of the first slice (a rough surface starts above the nominal one)"             # measured curves; .xy is what Multifitting writes
 
 
 # ==============================================================================
@@ -114,17 +106,6 @@ def program_icon():
     return QIcon()
 
 
-def style_axes(ax, background):
-    """Theme colors on one plot: background (None = keep), frame, ticks, title and axis labels."""
-    if background is not None:
-        ax.set_facecolor(background)
-    for spine in ax.spines.values():
-        spine.set_color(colors["edge"])
-    ax.tick_params(which="both", colors=colors["text"])
-    for text in (ax.title, ax.xaxis.label, ax.yaxis.label):
-        text.set_color(colors["text"])
-
-
 def mix_text(weights):
     """'100 % erf' or '70 % erf + 30 % exp': the normalized mix of a boundary profile."""
     w = profile_weights(weights)
@@ -158,12 +139,6 @@ class DropZone(QLabel):
         if path:
             event.acceptProposedAction()
             self.file_dropped.emit(path)
-
-
-class MiniCanvas(FigureCanvas):
-    """Small matplotlib canvas that lets the mouse wheel scroll the list of materials."""
-    def wheelEvent(self, event):
-        event.ignore()
 
 
 # ==============================================================================
@@ -327,11 +302,8 @@ class LayerCard(QFrame):
         self.pages.addWidget(user_page)
         body.addWidget(self.pages, 1)
 
-        self.fig = Figure(figsize=(2.5, 1.6), dpi=80, facecolor=colors["card_plot"])
-        self.canvas = MiniCanvas(self.fig)
-        self.canvas.setFixedSize(240, 150)
-        self.ax = self.fig.add_subplot(111)
-        body.addWidget(self.canvas)
+        self.plot = MiniPlot()                               # thickness in every period
+        body.addWidget(self.plot)
         outer.addLayout(body)
 
         self.lbl_warn = QLabel("")
@@ -355,7 +327,6 @@ class LayerCard(QFrame):
         self.color = color
         self.swatch.setStyleSheet(f"color: {color}; font-size: 13pt; background: transparent;")
         self.lbl_warn.setStyleSheet(f"color: {colors['warning']}; font-weight: bold; background: transparent;")
-        self.fig.set_facecolor(colors["card_plot"])
         self.draw_graph()
 
     def set_library(self, library):
@@ -459,28 +430,15 @@ class LayerCard(QFrame):
         if self.material.mode == "user":
             self.lbl_user.setText(f"{n_user} values" + (" — used as they are." if n_user == N else
                                   f" — N = {N}, so they are interpolated (set N = {n_user} to use them as they are)."))
-        self.ax.clear()
-        self.ax.plot(period, d, '-o' if N <= 150 else '-', color=self.color, lw=1.4, ms=2.5)
         negative = int(np.sum(d < 0))
         missing = int(np.sum(d == 0))
         if negative:
-            self.ax.axhline(0.0, color=colors["warning"], lw=0.8, ls='--')
             self.lbl_warn.setText(f"⚠ d < 0 in {negative} of {N} periods — those layers are left out")
         self.lbl_warn.setVisible(negative > 0)
         title = f"{self.material.name or '—'}: {d.min():.1f} … {d.max():.1f} Å"
         if missing:
             title += f"  ({missing} × 0)"
-        self.ax.set_title(title, fontsize=8, pad=3)
-        self.ax.set_xlabel("period  (1 = top)", fontsize=7, labelpad=1)
-        self.ax.set_ylabel("d (Å)", fontsize=7, labelpad=1)
-        self.ax.tick_params(labelsize=6.5, length=2, pad=1)
-        self.ax.grid(True, ls='--', alpha=0.4, lw=0.6, color=colors["grid"])
-        style_axes(self.ax, colors["card_plot"])
-        try:
-            self.fig.tight_layout(pad=0.4)
-        except Exception:
-            pass
-        self.canvas.draw_idle()
+        self.plot.draw(period, d, self.color, title)
 
 
 # ==============================================================================
@@ -501,7 +459,7 @@ PARAMETERS = [
     ("sub_erf",        "Substrate erf",              1.0,            0.0,     1.0,      0.1,     2,   "interface", "Weight 0 … 1 of the error-function step in the substrate boundary"),
     ("sub_lin",        "Substrate lin",              0.0,            0.0,     1.0,      0.1,     2,   "interface", "Weight 0 … 1 of the linear ramp in the substrate boundary"),
     ("sub_exp",        "Substrate exp",              0.0,            0.0,     1.0,      0.1,     2,   "interface", "Weight 0 … 1 of the exponential step in the substrate boundary"),
-    ("slice_d",        "Slice thickness d (Å)",      2.0,            0.05,    100.0,    0.5,     2,   "interface", "The smooth transitions are cut into slices of at most d. Equal slices act as a grating with a false peak at q = 2π/d: keep d ≤ π/(4·q max)"),
+    ("slice_d",        "Slice thickness d (Å)",      2.0,            0.05,    100.0,    0.5,     2,   "interface", "The smooth transitions are cut into slices of at most d. Equal slices act as a grating with a false peak at q = 2π/d, so the largest d accepted is π/(4·q max) of the plots (the peak then lies beyond 8·q max)"),
     ("chaos",          "Chaos 0…1",                  0.0,            0.0,     1.0,      0.05,    2,   "interface", "Every boundary gets its own width σ·(1 + chaos·u), u random in [−1, 1]"),
     ("seed",           "Random seed",                1,              0,       999999,   1,       0,   "interface", "Same seed = same random structure (reproducible curves); change it for another realization"),
 
@@ -639,16 +597,12 @@ class MultilayerApp(QMainWindow):
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        self.fig = Figure(figsize=(8, 8), dpi=100, facecolor=colors["figure"])
-        self.canvas = FigureCanvas(self.fig)
-        self.right_layout = right_layout
-        self.toolbar = NavigationToolbar(self.canvas, self)
-        right_layout.addWidget(self.toolbar)
-        right_layout.addWidget(self.canvas)
-        self.ax_n = self.fig.add_subplot(2, 2, 1)    # neutron R(q)
-        self.ax_x = self.fig.add_subplot(2, 2, 2)    # X-ray R(q)
-        self.ax_v = self.fig.add_subplot(2, 2, 3)    # V(z)
-        self.ax_e = self.fig.add_subplot(2, 2, 4)    # ε(z)
+        self.plots = PlotPanel()                             # neutron R(q), X-ray R(q), V(z), ε(z)
+        right_layout.addWidget(self.plots)
+        hint = QLabel("Plots: drag = move · wheel = zoom (over an axis: that axis only) · "
+                      "right-click = View All / Export (PNG, SVG, CSV) · 'A' corner button = full view again")
+        hint.setObjectName("Formula")
+        right_layout.addWidget(hint)
         splitter.addWidget(right)
         splitter.setSizes([580, 1070])
 
@@ -1152,7 +1106,7 @@ class MultilayerApp(QMainWindow):
 
     # ------------------------------------------------------------------ theme
     def apply_theme(self):
-        """Light or dark: Qt stylesheet + palette, plot colors, material card colors, plot toolbar icons."""
+        """Light or dark: Qt stylesheet + palette, plot colors, material card colors."""
         name = self.v("theme")
         colors.clear()
         colors.update(THEMES[name])
@@ -1171,20 +1125,9 @@ class MultilayerApp(QMainWindow):
             app.setPalette(app.style().standardPalette())
         app.setStyleSheet(colors["style"])
 
-        matplotlib.rcParams.update({"text.color": colors["text"], "axes.labelcolor": colors["text"],
-                                    "xtick.color": colors["text"], "ytick.color": colors["text"],
-                                    "axes.edgecolor": colors["edge"], "axes.facecolor": colors["axes"],
-                                    "figure.facecolor": colors["figure"], "grid.color": colors["grid"]})
-        self.fig.set_facecolor(colors["figure"])
+        self.plots.apply_theme()
         for i, card in enumerate(self.cards):
             card.set_color(colors["layers"][i % len(colors["layers"])])
-
-        # the toolbar picks light or dark icons when it is made: make it again
-        toolbar = NavigationToolbar(self.canvas, self)
-        self.right_layout.replaceWidget(self.toolbar, toolbar)
-        self.toolbar.setParent(None)
-        self.toolbar.deleteLater()
-        self.toolbar = toolbar
         self.schedule_update()
 
     # ------------------------------------------------------------------ reference table
@@ -1252,14 +1195,28 @@ class MultilayerApp(QMainWindow):
                         epsilon=complex(self.v("eps_sub_re"), self.v("eps_sub_im")), sigma=self.v("sigma_sub"),
                         profile=(self.v("sub_erf"), self.v("sub_lin"), self.v("sub_exp")))
 
-    def slicing_summary(self, interface):
-        """Text: how many slices every kind of boundary gets (before chaos)."""
+    def limit_slice_thickness(self, q_highest):
+        """
+        The largest slice thickness the entry accepts: d_max = π/(4·q_highest).
+        Equal slices act as a grating with a false Bragg peak at q = 2π/d; with d ≤ d_max that peak lies
+        beyond 8·q_highest, far outside the plots. A larger d in the entry is lowered to d_max.
+        """
+        d_max = max(np.floor(np.pi / (4.0 * q_highest) * 100.0) / 100.0, 0.05)    # rounded down to the entry's 0.01 Å
+        entry = self.params["slice_d"]
+        entry.blockSignals(True)                             # this calculation already uses the new value
+        entry.setMaximum(d_max)
+        entry.blockSignals(False)
+        return d_max
+
+    def slicing_summary(self, interface, d_max, q_highest):
+        """Text: how many slices every kind of boundary gets (before chaos), and the largest d allowed."""
         media = [(f"{m.name or '—'} upper", m) for m in self.materials] + [("substrate", self.substrate())]
         parts = [f"{name} (σ {m.sigma:g} Å, {mix_text(m.profile)}): {interface.n_slices(m.sigma, m.profile) or 'sharp'}"
                  for name, m in media]
         text = (f"Slices per boundary (erf ±4σ, lin ±√3σ, exp ±7σ — the widest step used — cut into slices "
                 f"≤ {interface.slice_thickness:g} Å):  " + "  ·  ".join(parts)
-                + ".  The flat middle of every layer is one more slice.")
+                + ".  The flat middle of every layer is one more slice."
+                + f"  Largest d accepted for q up to {q_highest:.3f} Å⁻¹: {d_max:g} Å.")
         if interface.chaos > 0:
             text += f"  Chaos: every boundary's σ varies by ±{100 * interface.chaos:.0f} %, so these numbers vary too."
         return text
@@ -1273,22 +1230,24 @@ class MultilayerApp(QMainWindow):
 
     def update_calculation(self):
         started = time.time()
-        for ax in (self.ax_n, self.ax_x, self.ax_v, self.ax_e):
-            ax.clear()
+        self.plots.clear_all()
         if not self.materials:
-            self.canvas.draw_idle()
             return
 
+        # ---- q grids of both plots; they decide the largest slice thickness ----
         N = self.v("N")
-        interface = self.interface()
         target = self.v("target")
+        q_c, q_top, qc_name = self.target_edge()
+        q = self.q_values(q_top)
+        q_x = np.linspace(self.v("q_min"), self.v("xq_max"), self.v("xq_points"))
+        q_highest = max(q[-1], q_x[-1])
+        d_max = self.limit_slice_thickness(q_highest)
+        interface = self.interface()
 
         # ---- neutrons: METHOD 1 + METHOD 2.1 (the same calls the optimizer uses) ----
         k = self.v("k")
-        q_c, q_top, qc_name = self.target_edge()
         ambient, substrate = self.ambient(), self.substrate()
         potentials, thicknesses = build_stack(self.materials, N, ambient, substrate, interface)
-        q = self.q_values(q_top)
         R = neutron_reflectivity(potentials, thicknesses, q)
         self.mean_R = mean_reflectivity(R, q, q_top)
         near_edge = q >= self.v("edge_fraction") * q_top
@@ -1299,7 +1258,6 @@ class MultilayerApp(QMainWindow):
         wavelength = self.v("lambda_x")
         k_x = 2 * np.pi / wavelength
         epsilons, _ = build_stack(self.materials, N, ambient, substrate, interface, quantity="epsilon")
-        q_x = np.linspace(self.v("q_min"), self.v("xq_max"), self.v("xq_points"))
         R_x = xray_reflectivity(epsilons, thicknesses, q_x, wavelength, self.v("polarization"))
         densest = max(self.materials, key=lambda mat: 1.0 - mat.epsilon.real)
         q_cx = xray_critical_q(densest.epsilon, wavelength)
@@ -1319,102 +1277,41 @@ class MultilayerApp(QMainWindow):
         self.show_measured_info("xray", measured_x, q_x[-1])
 
         # ---- neutron R(q) ----
-        a = self.ax_n
-        self.draw_reflectivity(a, q, R, k, colors["neutron"], self.v("neutron_background"),
-                               measured_n, self.measured["neutron"])
-        a.axvspan(0.0, q_top, color=colors["range_ok"] if ok else colors["range_low"], alpha=colors["range_alpha"],
-                  zorder=0, label=f'target range 0 … m·$q_c$ = {q_top:.4f} Å⁻¹')
-        a.axvline(q_c, color=colors["q_c"], ls='--', lw=1.2, alpha=0.7, label=f'{qc_name} $q_c$ ({q_c:.4f} Å⁻¹)')
-        a.axvline(q_top, color=colors["edge_line"], ls=':', lw=1.4, label=f'm·$q_c$ (m = {self.m:.2f})')
-        a.hlines(target, 0.0, q_top, colors=colors["target"], linestyles='--', lw=1.0, label=f'target ⟨R⟩ = {target:.3f}')
+        panel, log_scale, decades = self.plots, self.v("R_scale") == "log", self.v("log_decades")
+        a = panel.neutron
+        panel.draw_reflectivity(a, q, R, k, colors["neutron"], log_scale, decades, self.v("neutron_background"),
+                                measured_n, self.measured["neutron"] and self.measured["neutron"][0])
+        panel.add_range(a, 0.0, q_top, colors["range_ok"] if ok else colors["range_low"], colors["range_alpha"],
+                        f"target range 0 … m·q<sub>c</sub> = {q_top:.4f} Å⁻¹")
+        panel.add_vline(a, q_c, colors["q_c"], DASH, f"{qc_name} q<sub>c</sub> ({q_c:.4f} Å⁻¹)")
+        panel.add_vline(a, q_top, colors["edge_line"], DOT, f"m·q<sub>c</sub> (m = {self.m:.2f})", width=1.4, alpha=1.0)
+        panel.add_segment(a, 0.0, q_top, target, colors["target"], DASH, f"target ⟨R⟩ = {target:.3f}")
         n_layers = sum(int(np.sum(m.thicknesses(N) > 0)) for m in self.materials)     # layers really in the stack
-        a.set_title(f"Neutrons · E = {self.v('energy'):.3f} meV · N = {N} ({n_layers} layers)\n"
-                    f"⟨R⟩(0…m·$q_c$) = {self.mean_R:.4f} {'✓' if ok else '✗'} (target {target:.3f})"
-                    f"  ·  R near m·$q_c$ ≈ {edge_R:.3f}", fontsize=9, fontweight='bold', pad=6)
-        self.draw_legend(a, 'lower left' if self.v("R_scale") == "log" else 'best')
+        style_plot(a, colors["axes"],
+                   f"Neutrons · E = {self.v('energy'):.3f} meV · N = {N} ({n_layers} layers)<br>"
+                   f"⟨R⟩(0…m·q<sub>c</sub>) = {self.mean_R:.4f} {'✓' if ok else '✗'} (target {target:.3f})"
+                   f"  ·  R near m·q<sub>c</sub> ≈ {edge_R:.3f}",
+                   Q_LABEL, "Reflectivity <i>R</i>")
+        panel.place_legend(a, "lower left" if log_scale else "upper right")
 
         # ---- X-ray R(q) ----
-        a = self.ax_x
-        self.draw_reflectivity(a, q_x, R_x, k_x, colors["xray"], self.v("xray_background"),
-                               measured_x, self.measured["xray"])
-        a.axvline(q_cx, color=colors["q_c"], ls='--', lw=1.2, alpha=0.7, label=f'{densest.name} $q_c$ ({q_cx:.4f} Å⁻¹)')
-        a.set_title(f"X-rays · λ = {wavelength:.4f} Å ({self.v('E_x'):.3f} keV), {self.v('polarization')}-polarization\n"
-                    f"same structure, ε from the material cards", fontsize=9, fontweight='bold', pad=6)
-        self.draw_legend(a, 'upper right')
+        a = panel.xray
+        panel.draw_reflectivity(a, q_x, R_x, k_x, colors["xray"], log_scale, decades, self.v("xray_background"),
+                                measured_x, self.measured["xray"] and self.measured["xray"][0])
+        panel.add_vline(a, q_cx, colors["q_c"], DASH, f"{densest.name} q<sub>c</sub> ({q_cx:.4f} Å⁻¹)")
+        style_plot(a, colors["axes"],
+                   f"X-rays · λ = {wavelength:.4f} Å ({self.v('E_x'):.3f} keV), {self.v('polarization')}-polarization<br>"
+                   f"same structure, ε from the material cards", Q_LABEL, "Reflectivity <i>R</i>")
+        panel.place_legend(a, "upper right")
 
-        # ---- profiles of the same structure; warn if the slices are thick enough to show their false peak ----
-        q_highest = max(q[-1], q_x[-1])
-        slice_warning = ""
-        any_rough = self.v("sigma_sub") > 0 or any(m.sigma > 0 for m in self.materials)
-        self.lbl_slices.setText(self.slicing_summary(interface))
-        if any_rough and self.v("slice_d") > np.pi / (4 * q_highest):
-            slice_warning = (f"\n⚠ d = {self.v('slice_d'):g} Å: false peak at 2π/d = {2 * np.pi / self.v('slice_d'):.3f} Å⁻¹"
-                             f" — use d ≤ {np.pi / (4 * q_highest):.1f} Å")
-        self.draw_profile(self.ax_v, potentials, thicknesses, "Potential $V$ (µeV)", colors["potential"],
-                          f"Neutron potential $V(z)$ ({len(potentials) - 2} slices)"
-                          + slice_warning)
-        self.draw_profile(self.ax_e, (1.0 - epsilons.real) * 1e5, thicknesses, "(1 − Re ε) × 10⁵", colors["epsilon"],
-                          "X-ray permittivity: 1 − Re ε(z)")
-
-        self.fig.tight_layout(pad=1.6)
-        self.canvas.draw_idle()
+        # ---- depth profiles of the same structure ----
+        self.lbl_slices.setText(self.slicing_summary(interface, d_max, q_highest))
+        panel.draw_profile(panel.potential, potentials, thicknesses, self.v("z_pad"), colors["potential"])
+        style_plot(panel.potential, colors["axes"], f"Neutron potential <i>V</i>(z) ({len(potentials) - 2} slices)",
+                   Z_LABEL, "Potential <i>V</i> (µeV)")
+        panel.draw_profile(panel.epsilon, (1.0 - epsilons.real) * 1e5, thicknesses, self.v("z_pad"), colors["epsilon"])
+        style_plot(panel.epsilon, colors["axes"], "X-ray permittivity: 1 − Re ε(z)", Z_LABEL, "(1 − Re ε) × 10<sup>5</sup>")
         self.calc_seconds = time.time() - started
-
-    def draw_reflectivity(self, ax, q, R, k, color, background=0.0, measured=None, measured_file=None):
-        """R(q) curve on a log or linear axis, with the glancing angle of this beam (k) on the top axis.
-        background is added to the drawn curve only (Multifitting's 'Background': what the detector shows
-        when there is almost no reflection). measured = (q[], R[]) of a measured curve, drawn as points."""
-        R = R + background
-        label = 'Parratt' if background == 0 else f'Parratt + background {background:.3g}'
-        shown = R if measured is None else np.concatenate((R, measured[1]))    # what the y axis must hold
-        if self.v("R_scale") == "log":
-            # the axis follows the curves: from the decade above max R down to the decade of min R,
-            # but at most log_decades decades
-            R_top = max(float(shown.max()), 1e-300)
-            R_low = float(shown[shown > 0].min()) if np.any(shown > 0) else R_top
-            top_decade = np.ceil(np.log10(R_top))
-            bottom_decade = max(np.floor(np.log10(R_low)), top_decade - self.v("log_decades"))
-            ax.set_yscale("log")
-            ax.plot(q, np.clip(R, 10.0 ** (bottom_decade - 1), None), color=color, lw=1.4, label=label, zorder=3)
-            ax.set_ylim(10.0 ** bottom_decade, R_top * 1.5)
-        else:
-            ax.plot(q, R, color=color, lw=1.4, label=label, zorder=3)
-            ax.set_ylim(0.0, max(1.05, 1.05 * float(shown.max())))
-        if measured is not None:
-            q_m, R_m = measured
-            keep = R_m > 0 if self.v("R_scale") == "log" else np.isfinite(R_m)   # log axis: no points ≤ 0
-            ax.plot(q_m[keep], R_m[keep], ls='none', marker='o', ms=1.8, color=colors["data"], alpha=0.75,
-                    label=f'measured: {measured_file[0]}', zorder=2)
-        ax.set_xlim(0.0, q[-1])
-        ax.set_xlabel("Momentum transfer $q$ (Å⁻¹)", fontsize=9)
-        ax.set_ylabel("Reflectivity $R$", fontsize=9)
-        ax.grid(True, which="both", ls="--", alpha=0.4, color=colors["grid"])
-        style_axes(ax, colors["axes"])
-        top_axis = ax.secondary_xaxis('top', functions=(lambda x: glancing_angle(x, k),
-                                                        lambda th: q_from_angle(th, k)))
-        top_axis.set_xlabel("Glancing angle θ (°)", fontsize=8)
-        top_axis.tick_params(labelsize=8)
-        style_axes(top_axis, None)
-
-    def draw_legend(self, ax, location):
-        ax.legend(loc=location, fontsize=7, framealpha=0.9, facecolor=colors["axes"], edgecolor=colors["edge"],
-                  labelcolor=colors["text"])
-
-    def draw_profile(self, ax, values, thicknesses, ylabel, color, title):
-        """Depth profile of one quantity: each slice drawn from its top edge to its bottom edge."""
-        pad = self.v("z_pad")
-        edges = np.concatenate(([-pad], np.cumsum(thicknesses[:-1]), [thicknesses.sum() + pad]))
-        ax.stairs(values, edges, baseline=0.0, fill=True, color=color, alpha=0.15)
-        ax.stairs(values, edges, color=color, lw=1.2)
-        ax.set_title(title, fontsize=9.5, fontweight='bold', pad=6)
-        ax.set_xlabel("Depth $z$ (Å) from the top of the first slice (a rough surface starts 4σ above the nominal one)",
-                      fontsize=8)
-        ax.set_ylabel(ylabel, fontsize=9)
-        ax.set_xlim(edges[0], edges[-1])
-        span = values.max() - values.min()
-        ax.set_ylim(values.min() - 0.2 * span - 0.01, values.max() + 0.2 * span + 0.01)
-        ax.grid(True, ls="--", alpha=0.4, color=colors["grid"])
-        style_axes(ax, colors["axes"])
 
     # ------------------------------------------------------------------ optimizer
     def set_hayter_mook(self):

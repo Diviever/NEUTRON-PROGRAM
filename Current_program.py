@@ -11,7 +11,8 @@ Files:
                      .xlsx structure files (column A material, column B thickness in nm)
                      and measured curves (.xy: column 1 θ / 2θ / q, column 2 intensity)
   optimizer.py    gradient descent on the Material objects + search over N
-  gui.py          window: one card per Material, plots, optimizer controls
+  gui.py          window: one card per Material, parameter tabs, optimizer controls
+  plots.py        the plots, drawn with pyqtgraph (install once:  pip install pyqtgraph)
   gui_style.py    light and dark theme: stylesheets and colors
   icon.svg        program icon (icon.png / icon.ico are made from it; the window uses icon.png)
 """

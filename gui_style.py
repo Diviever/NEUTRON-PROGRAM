@@ -6,7 +6,7 @@ gui_style.py — visual design of the GUI: Qt stylesheets and plot colors of the
         "layers"   line colors of the material cards (cycled in the order the materials are added)
         "palette"  Qt palette colors (dark theme only: the parts a stylesheet does not reach,
                    e.g. tooltips, scroll bars, drop-down lists, plot toolbar icons)
-        all other keys: colors of the matplotlib plots
+        all other keys: colors of the plots (pyqtgraph, plots.py)
 
 The dark theme uses the colors of the program icon: background #2C2C2C, light accent #BFC7FF,
 dark accent #5E6598, and shades of gray for everything else.
@@ -245,7 +245,7 @@ THEMES = {
         "style": LIGHT_STYLE,
         "layers": ['#0052cc', '#c81e1e', '#1a7f37', '#8250df', '#bf8700', '#0a7ea4', '#cf222e'],
         "palette": None,                  # the normal palette of the system style
-        # matplotlib
+        # plots
         "figure": '#ffffff', "axes": '#ffffff', "card_plot": '#ffffff',
         "text": '#24292f', "edge": '#57606a', "grid": '#b0b7bf',
         "neutron": '#0052cc', "xray": '#8250df', "data": '#24292f',
@@ -263,7 +263,7 @@ THEMES = {
             "HighlightedText": '#FFFFFF', "Link": '#BFC7FF', "PlaceholderText": '#7A7A7A',
         },
         "disabled_text": '#7A7A7A',
-        # matplotlib
+        # plots
         "figure": '#2C2C2C', "axes": '#262626', "card_plot": '#3A3A3A',
         "text": '#E6E6E6', "edge": '#8A8A8A', "grid": '#555555',
         "neutron": '#BFC7FF', "xray": '#8E96D0', "data": '#D9D9D9',
@@ -273,5 +273,5 @@ THEMES = {
     },
 }
 
-# kept for older imports: the light theme's values
-LAYER_COLORS = THEMES["light"]["layers"]
+# The theme in use: gui.apply_theme() refills this dict, the plots (plots.py) read their colors from it
+colors = dict(THEMES["light"])
