@@ -530,6 +530,8 @@ PARAMETERS = [
     ("neutron_unit",   "Neutron file: column 1 is",  ("θ (°)", "2θ (°)", "q (Å⁻¹)", "q (nm⁻¹)"), None, None, None, None, "data", "Meaning of the first column; θ and 2θ are turned into q with the neutron k"),
     ("xray_factor",    "X-ray points × factor",      1.0,            1e-9,    1e9,      0.1,     4,   "data",      "The measured intensities are multiplied by this (after the normalization)"),
     ("neutron_factor", "Neutron points × factor",    1.0,            1e-9,    1e9,      0.1,     4,   "data",      "The measured intensities are multiplied by this (after the normalization)"),
+    ("xray_background",    "X-ray background",       0.0,            0.0,     1.0,      1e-6,    10,  "data",      "Added to the calculated X-ray R in the plot only, as Multifitting's 'Background': the detector cannot see less than about one count. ⟨R⟩ and the optimizer use R without it"),
+    ("neutron_background", "Neutron background",     0.0,            0.0,     1.0,      1e-6,    10,  "data",      "Added to the calculated neutron R in the plot only (as Multifitting's 'Background'). ⟨R⟩ and the optimizer use R without it"),
     ("data_norm",      "Normalize measured",         ("max = 1", "as it is"), None, None, None, None, "data", "max = 1: counts are divided by their maximum, so they compare with R; as it is: the numbers of the file"),
 
     ("m",              "m",                          2.0,            1.01,    10.0,     0.1,     2,   "target",    "High reflectivity is wanted for 0 < q ≤ m·q_c"),
@@ -813,6 +815,8 @@ class MultilayerApp(QMainWindow):
             buttons = QHBoxLayout()
             for text, action, tip in (("Browse…", self.browse_measured, "Choose the file"),
                                       ("Fit q range", self.fit_q_to_measured, "Extend the q axis of this plot to the last measured point"),
+                                      ("1-count background", self.background_from_measured,
+                                       "Set this plot's background to the smallest measured value above 0 (one detector count)"),
                                       ("Clear", self.clear_measured, "Remove the measured points from the plot")):
                 button = QPushButton(text)
                 button.setToolTip(tip)
@@ -1127,6 +1131,13 @@ class MultilayerApp(QMainWindow):
             _, q_top, _ = self.target_edge()
             self.params["q_max_factor"].setValue(np.ceil(q_last / q_top * 100) / 100)
 
+    def background_from_measured(self, which):
+        """Background = the smallest measured value above 0, i.e. one detector count on the plot's scale."""
+        curve = self.measured_curve(which)
+        if curve is None or not np.any(curve[1] > 0):
+            return
+        self.params[f"{which}_background"].setValue(float(curve[1][curve[1] > 0].min()))
+
     def show_measured_info(self, which, curve, q_end):
         """Status line under a drop zone: points, range in the file and in q."""
         if curve is None:
@@ -1309,7 +1320,8 @@ class MultilayerApp(QMainWindow):
 
         # ---- neutron R(q) ----
         a = self.ax_n
-        self.draw_reflectivity(a, q, R, k, colors["neutron"], measured_n, self.measured["neutron"])
+        self.draw_reflectivity(a, q, R, k, colors["neutron"], self.v("neutron_background"),
+                               measured_n, self.measured["neutron"])
         a.axvspan(0.0, q_top, color=colors["range_ok"] if ok else colors["range_low"], alpha=colors["range_alpha"],
                   zorder=0, label=f'target range 0 … m·$q_c$ = {q_top:.4f} Å⁻¹')
         a.axvline(q_c, color=colors["q_c"], ls='--', lw=1.2, alpha=0.7, label=f'{qc_name} $q_c$ ({q_c:.4f} Å⁻¹)')
@@ -1323,7 +1335,8 @@ class MultilayerApp(QMainWindow):
 
         # ---- X-ray R(q) ----
         a = self.ax_x
-        self.draw_reflectivity(a, q_x, R_x, k_x, colors["xray"], measured_x, self.measured["xray"])
+        self.draw_reflectivity(a, q_x, R_x, k_x, colors["xray"], self.v("xray_background"),
+                               measured_x, self.measured["xray"])
         a.axvline(q_cx, color=colors["q_c"], ls='--', lw=1.2, alpha=0.7, label=f'{densest.name} $q_c$ ({q_cx:.4f} Å⁻¹)')
         a.set_title(f"X-rays · λ = {wavelength:.4f} Å ({self.v('E_x'):.3f} keV), {self.v('polarization')}-polarization\n"
                     f"same structure, ε from the material cards", fontsize=9, fontweight='bold', pad=6)
@@ -1347,9 +1360,12 @@ class MultilayerApp(QMainWindow):
         self.canvas.draw_idle()
         self.calc_seconds = time.time() - started
 
-    def draw_reflectivity(self, ax, q, R, k, color, measured=None, measured_file=None):
+    def draw_reflectivity(self, ax, q, R, k, color, background=0.0, measured=None, measured_file=None):
         """R(q) curve on a log or linear axis, with the glancing angle of this beam (k) on the top axis.
-        measured = (q[], R[]) of a measured curve, drawn as points (None = no file)."""
+        background is added to the drawn curve only (Multifitting's 'Background': what the detector shows
+        when there is almost no reflection). measured = (q[], R[]) of a measured curve, drawn as points."""
+        R = R + background
+        label = 'Parratt' if background == 0 else f'Parratt + background {background:.3g}'
         shown = R if measured is None else np.concatenate((R, measured[1]))    # what the y axis must hold
         if self.v("R_scale") == "log":
             # the axis follows the curves: from the decade above max R down to the decade of min R,
@@ -1359,10 +1375,10 @@ class MultilayerApp(QMainWindow):
             top_decade = np.ceil(np.log10(R_top))
             bottom_decade = max(np.floor(np.log10(R_low)), top_decade - self.v("log_decades"))
             ax.set_yscale("log")
-            ax.plot(q, np.clip(R, 10.0 ** (bottom_decade - 1), None), color=color, lw=1.4, label='Parratt', zorder=3)
+            ax.plot(q, np.clip(R, 10.0 ** (bottom_decade - 1), None), color=color, lw=1.4, label=label, zorder=3)
             ax.set_ylim(10.0 ** bottom_decade, R_top * 1.5)
         else:
-            ax.plot(q, R, color=color, lw=1.4, label='Parratt', zorder=3)
+            ax.plot(q, R, color=color, lw=1.4, label=label, zorder=3)
             ax.set_ylim(0.0, max(1.05, 1.05 * float(shown.max())))
         if measured is not None:
             q_m, R_m = measured
