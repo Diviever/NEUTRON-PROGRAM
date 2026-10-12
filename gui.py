@@ -65,7 +65,7 @@ EPS_SIO2 = 0.999985752 + 1.8523e-07j
 SUPERSCRIPT = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
 CURVE_FILES = (".xy", ".dat", ".txt", ".csv")
 Q_LABEL = "Momentum transfer <i>q</i> (Å<sup>−1</sup>)"           # axis titles of the plots (HTML)
-Z_LABEL = "Depth <i>z</i> (Å) from the top of the first slice (a rough surface starts above the nominal one)"             # measured curves; .xy is what Multifitting writes
+Z_LABEL = "Depth <i>z</i> (Å) from the top of the first slice<br>(a rough surface starts above the nominal one)"             # measured curves; .xy is what Multifitting writes
 
 
 # ==============================================================================
@@ -124,7 +124,7 @@ class DropZone(QLabel):
         self.setAcceptDrops(True)
         self.setWordWrap(True)
         self.setAlignment(qenum(Qt, 'AlignmentFlag', 'AlignCenter'))
-        self.setMinimumHeight(70)
+        self.setMinimumHeight(50)
 
     def dragEnterEvent(self, event):
         if dropped_path(event, self.extensions):
@@ -177,19 +177,15 @@ class LayerCard(QFrame):
         self.cmb_name = QComboBox()                          # library materials; any other name can be typed
         self.cmb_name.setEditable(True)
         self.cmb_name.setInsertPolicy(qenum(QComboBox, 'InsertPolicy', 'NoInsert'))
-        self.cmb_name.setMinimumWidth(105)
+        self.cmb_name.setMinimumWidth(90)
         self.cmb_name.setToolTip("Choose a material of the library (fills V and ε), or type any name")
         self.set_library(library or {})
         head.addWidget(self.cmb_name)
         head.addWidget(QLabel("V (µeV):"))
         self.ed_pot = QLineEdit()
-        self.ed_pot.setMaximumWidth(75)
+        self.ed_pot.setMaximumWidth(70)
         head.addWidget(self.ed_pot)
         head.addStretch(1)
-        head.addWidget(QLabel("d(t):"))
-        self.cmb_mode = QComboBox()
-        self.cmb_mode.addItems(["Linear", "Polynomial", "User-determined"])
-        head.addWidget(self.cmb_mode)
         self.btn_remove = QPushButton("✕")
         self.btn_remove.setFixedWidth(28)
         self.btn_remove.setToolTip("Remove this material")
@@ -200,12 +196,12 @@ class LayerCard(QFrame):
         eps_row = QHBoxLayout()
         eps_row.addWidget(QLabel("X-ray  ε ="))
         self.ed_eps_re = QLineEdit()
-        self.ed_eps_re.setMaximumWidth(115)
+        self.ed_eps_re.setMaximumWidth(100)
         self.ed_eps_re.setToolTip("Real part of the dielectric permittivity at the X-ray energy in use")
         eps_row.addWidget(self.ed_eps_re)
         eps_row.addWidget(QLabel("+ i"))
         self.ed_eps_im = QLineEdit()
-        self.ed_eps_im.setMaximumWidth(115)
+        self.ed_eps_im.setMaximumWidth(90)
         self.ed_eps_im.setToolTip("Imaginary part (absorption, > 0)")
         eps_row.addWidget(self.ed_eps_im)
         eps_row.addStretch(1)
@@ -213,12 +209,12 @@ class LayerCard(QFrame):
 
         # ---- upper boundary of every layer of this material: width σ and shape (mix of erf, lin, exp) ----
         rough_row = QHBoxLayout()
-        rough_row.addWidget(QLabel("Upper boundary:  σ (Å)"))
+        rough_row.addWidget(QLabel("Upper boundary σ (Å)"))
         self.ed_sigma = QLineEdit()
         self.ed_sigma.setMaximumWidth(55)
         self.ed_sigma.setToolTip("rms roughness of the upper boundary of every layer of this material (0 = sharp)")
         rough_row.addWidget(self.ed_sigma)
-        rough_row.addSpacing(10)
+        rough_row.addSpacing(6)
         tips = {"erf": "error-function step: Gaussian roughness, smooth on both sides",
                 "lin": "straight ramp: a uniform mixing zone of width √12·σ",
                 "exp": "exponential step: steep in the middle with long tails"}
@@ -226,7 +222,7 @@ class LayerCard(QFrame):
         for name in PROFILE_NAMES:
             rough_row.addWidget(QLabel(name))
             entry = QLineEdit()
-            entry.setMaximumWidth(42)
+            entry.setMaximumWidth(36)
             entry.setToolTip(f"Weight 0 … 1 of the {tips[name]}. The boundary is the weighted mix of the three "
                              f"steps (all with the same σ); the weights are divided by their sum.")
             rough_row.addWidget(entry)
@@ -237,8 +233,16 @@ class LayerCard(QFrame):
         rough_row.addStretch(1)
         outer.addLayout(rough_row)
 
-        # ---- body: entries of the two modes (left) + graph (right) ----
+        # ---- body: thickness law and its entries (left) + graph (right) ----
         body = QHBoxLayout()
+        left = QVBoxLayout()
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Thickness law d(t):"))
+        self.cmb_mode = QComboBox()
+        self.cmb_mode.addItems(["Linear", "Polynomial", "User-determined"])
+        mode_row.addWidget(self.cmb_mode)
+        mode_row.addStretch(1)
+        left.addLayout(mode_row)
         self.pages = QStackedWidget()
 
         linear_page = QWidget()
@@ -246,12 +250,14 @@ class LayerCard(QFrame):
         lg.setContentsMargins(0, 0, 0, 0)
         self.ed_start = QLineEdit()
         self.ed_end = QLineEdit()
+        self.ed_start.setMaximumWidth(90)
+        self.ed_end.setMaximumWidth(90)
         lg.addWidget(QLabel("d_start (Å):"), 0, 0)
         lg.addWidget(self.ed_start, 0, 1)
         lg.addWidget(QLabel("d_end (Å):"), 1, 0)
         lg.addWidget(self.ed_end, 1, 1)
         formula = QLabel("d(t) = d_start + (d_end − d_start)·t\n"
-                         "t = j/(N−1):  0 at the substrate, 1 at the vacuum")
+                         "t: 0 at the substrate, 1 at the top")
         formula.setObjectName("Formula")
         lg.addWidget(formula, 2, 0, 1, 2)
         lg.setRowStretch(3, 1)
@@ -274,7 +280,7 @@ class LayerCard(QFrame):
         self.coef_labels, self.coef_edits = [], []
         for k in range(MAX_DEGREE + 1):
             label, entry = QLabel(f"c{k}:"), QLineEdit()
-            entry.setMaximumWidth(90)
+            entry.setMaximumWidth(80)
             grid.addWidget(label, k // 2, 2 * (k % 2))
             grid.addWidget(entry, k // 2, 2 * (k % 2) + 1)
             self.coef_labels.append(label)
@@ -286,7 +292,9 @@ class LayerCard(QFrame):
         user_page = QWidget()                                # the thickness in every period, e.g. from a file
         uv = QVBoxLayout(user_page)
         uv.setContentsMargins(0, 0, 0, 0)
-        uv.addWidget(QLabel("Thickness in each period (Å), top period first:"))
+        hint = QLabel("Thickness in each period (Å), top period first:")
+        hint.setWordWrap(True)
+        uv.addWidget(hint)
         self.ed_user = QLineEdit()
         self.ed_user.setToolTip("Values separated by spaces or ';'. With N equal to their number they are used as they are, "
                                 "for another N they are interpolated.")
@@ -301,7 +309,8 @@ class LayerCard(QFrame):
         uv.addWidget(self.lbl_user)
         uv.addStretch(1)
         self.pages.addWidget(user_page)
-        body.addWidget(self.pages, 1)
+        left.addWidget(self.pages, 1)
+        body.addLayout(left, 1)
 
         self.plot = MiniPlot()                               # thickness in every period
         body.addWidget(self.plot)
@@ -460,7 +469,7 @@ PARAMETERS = [
     ("sub_erf",        "Substrate erf",              1.0,            0.0,     1.0,      0.1,     2,   "interface", "Weight 0 … 1 of the error-function step in the substrate boundary"),
     ("sub_lin",        "Substrate lin",              0.0,            0.0,     1.0,      0.1,     2,   "interface", "Weight 0 … 1 of the linear ramp in the substrate boundary"),
     ("sub_exp",        "Substrate exp",              0.0,            0.0,     1.0,      0.1,     2,   "interface", "Weight 0 … 1 of the exponential step in the substrate boundary"),
-    ("rough_method",   "Roughness method",           ("factor (fast, as Multifitting)", "slices (graded profile, slow)"), None, None, None, None, "interface",
+    ("rough_method",   "Roughness method",           ("factor (fast)", "slices (exact, slow)"), None, None, None, None, "interface",
      "factor: sharp layers, the reflection of every boundary × the Fourier transform of its roughness profile — one step per layer, "
      "same as Multifitting, good while σ is well below the layer thicknesses. slices: the blurred profile itself cut into thin slices — "
      "exact also for overlapping transitions / intermixing, but tens of times slower"),
@@ -521,15 +530,21 @@ PARAMETERS = [
 
 GROUP_TITLES = {
     "structure": "Multilayer",
-    "interface": "Interfaces (σ and shape of each boundary belong to the medium below it: the cards, the substrate here)",
-    "file":      "Structure from a file (.xlsx: column A = material, column B = thickness in nm)",
+    "interface": "Interfaces (roughness)",
+    "file":      "Structure file (.xlsx)",
     "beam":      "Neutron beam",
     "xray":      "X-ray beam",
     "plot":      "q grid & plots",
-    "data":      "Measured curves to compare (.xy as Multifitting writes it: column 1 = θ, 2θ or q, column 2 = intensity)",
+    "data":      "Measured curves (.xy)",
     "target":    "Supermirror target",
     "search":    "Search",
     "advanced":  "Advanced optimizer settings",
+}
+GROUP_NOTES = {                                             # shown as the tooltip of the group
+    "interface": "σ and shape of each boundary belong to the medium below it: set them on the material cards; "
+                 "the substrate's are here.",
+    "file":      "Column A = material, column B = thickness in nm.",
+    "data":      "As Multifitting writes it: column 1 = θ, 2θ or q, column 2 = intensity.",
 }
 REDRAW_GROUPS = ("structure", "interface", "beam", "xray", "plot", "data", "target")     # changing these recalculates the plots
 
@@ -602,14 +617,17 @@ class MultilayerApp(QMainWindow):
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        self.plots = PlotPanel()                             # neutron R(q), X-ray R(q), V(z), ε(z)
+        self.plots = PlotPanel()                             # X-ray column: R(q), ε(z) · neutron column: R(q), V(z)
         right_layout.addWidget(self.plots)
         hint = QLabel("Plots: drag = move · wheel = zoom (over an axis: that axis only) · "
                       "right-click = View All / Export (PNG, SVG, CSV) · 'A' corner button = full view again")
         hint.setObjectName("Formula")
+        hint.setWordWrap(True)
         right_layout.addWidget(hint)
         splitter.addWidget(right)
-        splitter.setSizes([580, 1070])
+        splitter.setStretchFactor(0, 1)                      # settings 1/3, the two plot columns 2/3
+        splitter.setStretchFactor(1, 2)
+        splitter.setSizes([1000, 2000])
 
         # ---- connections of the parameter entries (special handlers first, then the redraw) ----
         self.params["N"].valueChanged.connect(self.on_repeats_changed)
@@ -654,7 +672,10 @@ class MultilayerApp(QMainWindow):
     def build_group(self, group):
         """Group box with the entries of all PARAMETERS rows of this group, two per row."""
         box = QGroupBox(GROUP_TITLES[group])
+        box.setToolTip(GROUP_NOTES.get(group, ""))
         grid = QGridLayout(box)
+        grid.setHorizontalSpacing(6)
+        grid.setVerticalSpacing(3)
         rows = [p for p in PARAMETERS if p[7] == group]
         for i, (key, label, start, lo, hi, step, dec, _, tip) in enumerate(rows):
             if isinstance(start, tuple):
@@ -672,8 +693,10 @@ class MultilayerApp(QMainWindow):
                 widget.setSingleStep(step)
                 widget.setValue(start)
             widget.setToolTip(tip)
+            widget.setMaximumWidth(150 if isinstance(widget, QComboBox) else 125)
             text = QLabel(label + ":")
             text.setToolTip(tip)
+            text.setWordWrap(True)
             grid.addWidget(text, i // 2, 2 * (i % 2))
             grid.addWidget(widget, i // 2, 2 * (i % 2) + 1)
             self.params[key] = widget
@@ -721,8 +744,8 @@ class MultilayerApp(QMainWindow):
         self.add_full_row(grid, self.lbl_file)
         layout.addWidget(box)
 
-        box = QGroupBox(f"Material library — one text file per material in {LIBRARY_DIR.name}/ "
-                        f"(row 1: V in µeV, row 2: ε real imaginary)")
+        box = QGroupBox("Material library")
+        box.setToolTip(f"One text file per material in {LIBRARY_DIR.name}/ (row 1: V in µeV, row 2: ε real imaginary)")
         lib = QVBoxLayout(box)
         self.lib_table = QTableWidget(0, 4)
         self.lib_table.setHorizontalHeaderLabels(["Material", "V (µeV)", "ε real", "ε imag"])
@@ -843,7 +866,7 @@ class MultilayerApp(QMainWindow):
         return page
 
     def build_materials_box(self):
-        box = QGroupBox("Materials of the repeating unit — thickness laws d(t)")
+        box = QGroupBox("Materials of the period")
         layout = QVBoxLayout(box)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -1188,6 +1211,7 @@ class MultilayerApp(QMainWindow):
     def interface(self):
         """Interface object built from the entries of the 'Interfaces' group."""
         method = "slices" if self.v("rough_method").startswith("slices") else "factor"
+        self.params["slice_d"].setEnabled(method == "slices")            # only the slices use it
         return Interface(method=method, slice_thickness=self.v("slice_d"), chaos=self.v("chaos"), seed=self.v("seed"))
 
     def ambient(self):
@@ -1217,11 +1241,9 @@ class MultilayerApp(QMainWindow):
     def slicing_summary(self, interface, d_max, q_highest):
         """Text: how many slices every kind of boundary gets (before chaos), and the largest d allowed."""
         if interface.method == "factor":
-            text = ("Roughness by factors (the idea of Multifitting): sharp layers; the reflection and transmission of "
-                    "every boundary are multiplied by factors made from the Fourier transform of its profile "
-                    "(erf: r × exp(−2·kz₁kz₂·σ²), t·t′ × exp((kz₁ − kz₂)²σ²); lin and exp alike). No slices — the slice "
-                    "thickness is not used. Good while σ is well below the layer thicknesses; for overlapping "
-                    "transitions or intermixing use 'slices'.")
+            text = ("Factor method: sharp layers; each boundary's reflection and transmission × the Fourier transform "
+                    "of its profile (as Multifitting). Fast, no slices. Good while σ ≪ layer thickness; "
+                    "for overlapping transitions use 'slices'.")
             if interface.chaos > 0:
                 text += f"  Chaos: every boundary's σ varies by ±{100 * interface.chaos:.0f} %."
             return text
@@ -1305,8 +1327,8 @@ class MultilayerApp(QMainWindow):
         n_layers = sum(int(np.sum(m.thicknesses(N) > 0)) for m in self.materials)     # layers really in the stack
         style_plot(a, colors["axes"],
                    f"Neutrons · E = {self.v('energy'):.3f} meV · N = {N} ({n_layers} layers)<br>"
-                   f"⟨R⟩(0…m·q<sub>c</sub>) = {self.mean_R:.4f} {'✓' if ok else '✗'} (target {target:.3f})"
-                   f"  ·  R near m·q<sub>c</sub> ≈ {edge_R:.3f}",
+                   f"⟨R⟩(0…m·q<sub>c</sub>) = {self.mean_R:.4f} {'✓' if ok else '✗'} (target {target:.3f})<br>"
+                   f"R near m·q<sub>c</sub> ≈ {edge_R:.3f}",
                    Q_LABEL, "Reflectivity <i>R</i>")
         panel.place_legend(a, "lower left" if log_scale else "upper right")
 
@@ -1316,8 +1338,8 @@ class MultilayerApp(QMainWindow):
                                 measured_x, self.measured["xray"] and self.measured["xray"][0])
         panel.add_vline(a, q_cx, colors["q_c"], DASH, f"{densest.name} q<sub>c</sub> ({q_cx:.4f} Å⁻¹)")
         style_plot(a, colors["axes"],
-                   f"X-rays · λ = {wavelength:.4f} Å ({self.v('E_x'):.3f} keV), {self.v('polarization')}-polarization<br>"
-                   f"same structure, ε from the material cards", Q_LABEL, "Reflectivity <i>R</i>")
+                   f"X-rays · λ = {wavelength:.4f} Å ({self.v('E_x'):.3f} keV)<br>"
+                   f"{self.v('polarization')}-polarization · same structure, ε from the cards", Q_LABEL, "Reflectivity <i>R</i>")
         panel.place_legend(a, "upper right")
 
         # ---- depth profiles of the same structure: always the graded (rough) profile ----
@@ -1327,8 +1349,8 @@ class MultilayerApp(QMainWindow):
         self.lbl_slices.setText(self.slicing_summary(interface, d_max, q_highest))
         panel.draw_profile(panel.potential, potentials, thicknesses, self.v("z_pad"), colors["potential"])
         how = (f"{n_steps} slices" if interface.method == "slices" else
-               f"{n_steps} sharp layers × roughness factor; graded profile shown")
-        style_plot(panel.potential, colors["axes"], f"Neutron potential <i>V</i>(z) ({how})",
+               f"{n_steps} sharp layers × roughness factors · graded profile shown")
+        style_plot(panel.potential, colors["axes"], f"Neutron potential <i>V</i>(z)<br>{how}",
                    Z_LABEL, "Potential <i>V</i> (µeV)")
         panel.draw_profile(panel.epsilon, (1.0 - epsilons.real) * 1e5, thicknesses, self.v("z_pad"), colors["epsilon"])
         style_plot(panel.epsilon, colors["axes"], "X-ray permittivity: 1 − Re ε(z)", Z_LABEL, "(1 − Re ε) × 10<sup>5</sup>")

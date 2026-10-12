@@ -26,9 +26,9 @@ QGroupBox {
     background-color: #ffffff;
     border: 1px solid #d0d7de;
     border-radius: 6px;
-    margin-top: 10px;
+    margin-top: 8px;
     font-weight: bold;
-    padding: 12px 8px 8px 8px;
+    padding: 9px 5px 5px 5px;
 }
 QGroupBox::title {
     subcontrol-origin: margin;
@@ -60,7 +60,7 @@ QLabel#DropZone {
     background-color: #ffffff;
     border: 2px dashed #8c959f;
     border-radius: 8px;
-    padding: 12px;
+    padding: 6px;
     color: #57606a;
     font-weight: bold;
 }
@@ -72,7 +72,7 @@ QSpinBox, QDoubleSpinBox, QLineEdit, QComboBox {
     background-color: #ffffff;
     border: 1px solid #d0d7de;
     border-radius: 4px;
-    padding: 3px 6px;
+    padding: 1px 4px;
     font-weight: normal;
 }
 QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {
@@ -82,7 +82,7 @@ QPushButton {
     background-color: #ffffff;
     border: 1px solid #d0d7de;
     border-radius: 4px;
-    padding: 5px 12px;
+    padding: 3px 8px;
     font-weight: bold;
 }
 QPushButton:hover {
@@ -108,9 +108,9 @@ QGroupBox {
     background-color: #333333;
     border: 1px solid #474747;
     border-radius: 6px;
-    margin-top: 10px;
+    margin-top: 8px;
     font-weight: bold;
-    padding: 12px 8px 8px 8px;
+    padding: 9px 5px 5px 5px;
 }
 QGroupBox::title {
     subcontrol-origin: margin;
@@ -143,7 +143,7 @@ QLabel#DropZone {
     background-color: #333333;
     border: 2px dashed #6E6E6E;
     border-radius: 8px;
-    padding: 12px;
+    padding: 6px;
     color: #A8A8A8;
     font-weight: bold;
 }
@@ -155,7 +155,7 @@ QSpinBox, QDoubleSpinBox, QLineEdit, QComboBox {
     background-color: #262626;
     border: 1px solid #4F4F4F;
     border-radius: 4px;
-    padding: 3px 6px;
+    padding: 1px 4px;
     font-weight: normal;
     selection-background-color: #5E6598;
     selection-color: #FFFFFF;
@@ -173,7 +173,7 @@ QPushButton {
     background-color: #3C3C3C;
     border: 1px solid #555555;
     border-radius: 4px;
-    padding: 5px 12px;
+    padding: 3px 8px;
     font-weight: bold;
 }
 QPushButton:hover {

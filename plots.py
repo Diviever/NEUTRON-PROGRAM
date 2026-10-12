@@ -6,7 +6,7 @@ drag = move, mouse wheel = zoom, right-click = menu with "View All" and "Export�
 curves), the small "A" button in the corner = back to the full view.
 
     AngleAxis       top axis of an R(q) plot: ticks at round glancing angles θ (°) of that beam, q = 2k·sin θ
-    PlotPanel       the four plots of the main window: neutron R(q), X-ray R(q), V(z), 1 − Re ε(z)
+    PlotPanel       the four plots of the main window: X-ray column R(q) and 1 − Re ε(z), neutron column R(q) and V(z)
                         draw_reflectivity()  R(q) on a log or linear axis + measured points
                         add_vline(), add_segment(), add_range()   marks with a legend line
                         draw_profile()       depth profile as steps
@@ -107,14 +107,19 @@ class AngleAxis(pg.AxisItem):
 # The four plots of the main window
 # ==============================================================================
 class PlotPanel(pg.GraphicsLayoutWidget):
-    """Neutron R(q) and X-ray R(q) on top, the depth profiles V(z) and 1 − Re ε(z) below."""
+    """Two columns: X-ray R(q) over 1 − Re ε(z), neutron R(q) over V(z)."""
 
     def __init__(self):
         super().__init__()
-        self.neutron = self.addPlot(row=0, col=0, axisItems={"top": AngleAxis()})
-        self.xray = self.addPlot(row=0, col=1, axisItems={"top": AngleAxis()})
-        self.potential = self.addPlot(row=1, col=0)
-        self.epsilon = self.addPlot(row=1, col=1)
+        self.xray = self.addPlot(row=0, col=0, axisItems={"top": AngleAxis()})        # X-ray column
+        self.epsilon = self.addPlot(row=1, col=0)
+        self.neutron = self.addPlot(row=0, col=1, axisItems={"top": AngleAxis()})     # neutron column
+        self.potential = self.addPlot(row=1, col=1)
+        for plot in (self.xray, self.epsilon, self.neutron, self.potential):
+            for name in ("bottom", "left", "top"):
+                plot.getAxis(name).enableAutoSIPrefix(False)    # no "(×0.001)": the numbers are shown as they are
+        for plot in (self.epsilon, self.potential):
+            plot.getAxis("bottom").setHeight(62)                # room for the two-line depth label
         self.legends = {}
         for plot in (self.neutron, self.xray):
             plot.showAxis("top")
@@ -213,8 +218,10 @@ class MiniPlot(pg.PlotWidget):
 
     def __init__(self):
         super().__init__()
-        self.setFixedSize(240, 150)
+        self.setFixedSize(210, 135)
         self.setMouseEnabled(x=False, y=False)
+        for name in ("bottom", "left"):
+            self.getAxis(name).enableAutoSIPrefix(False)
         self.hideButtons()
         self.setMenuEnabled(False)
 
