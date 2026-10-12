@@ -104,8 +104,9 @@ class GradientDescent:
 
     def loss(self):
         """Evaluate the current materials (METHOD 1 + METHOD 2) and return the loss. Also sets self.mean_R."""
-        potentials, thicknesses = build_stack(self.materials, self.N, self.ambient, self.substrate, self.interface)
-        R = neutron_reflectivity(potentials, thicknesses, self.q)
+        potentials, thicknesses, roughness = build_stack(self.materials, self.N, self.ambient, self.substrate,
+                                                         self.interface)
+        R = neutron_reflectivity(potentials, thicknesses, self.q, roughness)
         self.mean_R = mean_reflectivity(R, self.q, self.q_top)
 
         too_thin = 0.0

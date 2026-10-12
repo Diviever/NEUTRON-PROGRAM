@@ -9,6 +9,7 @@ gui.py — user interface (PyQt5/PyQt6; the plots are drawn by plots.py with pyq
 
 Data flow:
     entries  ->  Material objects  ->  build_stack()  ->  neutron_reflectivity() / xray_reflectivity()  ->  plots
+                                        (the depth plots always show the graded profile: build_stack(graded=True))
     optimizer changes the same Material objects  ->  show_material() puts the numbers back in the entries
     measured .xy curves  ->  read_xy()  ->  x converted to q with the beam's k  ->  points on the R(q) plots
 
@@ -459,6 +460,10 @@ PARAMETERS = [
     ("sub_erf",        "Substrate erf",              1.0,            0.0,     1.0,      0.1,     2,   "interface", "Weight 0 … 1 of the error-function step in the substrate boundary"),
     ("sub_lin",        "Substrate lin",              0.0,            0.0,     1.0,      0.1,     2,   "interface", "Weight 0 … 1 of the linear ramp in the substrate boundary"),
     ("sub_exp",        "Substrate exp",              0.0,            0.0,     1.0,      0.1,     2,   "interface", "Weight 0 … 1 of the exponential step in the substrate boundary"),
+    ("rough_method",   "Roughness method",           ("factor (fast, as Multifitting)", "slices (graded profile, slow)"), None, None, None, None, "interface",
+     "factor: sharp layers, the reflection of every boundary × the Fourier transform of its roughness profile — one step per layer, "
+     "same as Multifitting, good while σ is well below the layer thicknesses. slices: the blurred profile itself cut into thin slices — "
+     "exact also for overlapping transitions / intermixing, but tens of times slower"),
     ("slice_d",        "Slice thickness d (Å)",      2.0,            0.05,    100.0,    0.5,     2,   "interface", "The smooth transitions are cut into slices of at most d. Equal slices act as a grating with a false peak at q = 2π/d, so the largest d accepted is π/(4·q max) of the plots (the peak then lies beyond 8·q max)"),
     ("chaos",          "Chaos 0…1",                  0.0,            0.0,     1.0,      0.05,    2,   "interface", "Every boundary gets its own width σ·(1 + chaos·u), u random in [−1, 1]"),
     ("seed",           "Random seed",                1,              0,       999999,   1,       0,   "interface", "Same seed = same random structure (reproducible curves); change it for another realization"),
@@ -1182,7 +1187,8 @@ class MultilayerApp(QMainWindow):
 
     def interface(self):
         """Interface object built from the entries of the 'Interfaces' group."""
-        return Interface(slice_thickness=self.v("slice_d"), chaos=self.v("chaos"), seed=self.v("seed"))
+        method = "slices" if self.v("rough_method").startswith("slices") else "factor"
+        return Interface(method=method, slice_thickness=self.v("slice_d"), chaos=self.v("chaos"), seed=self.v("seed"))
 
     def ambient(self):
         """The medium above the stack as a Material (its σ is not used: the top layer's σ is the surface)."""
@@ -1210,6 +1216,15 @@ class MultilayerApp(QMainWindow):
 
     def slicing_summary(self, interface, d_max, q_highest):
         """Text: how many slices every kind of boundary gets (before chaos), and the largest d allowed."""
+        if interface.method == "factor":
+            text = ("Roughness by factors (the idea of Multifitting): sharp layers; the reflection and transmission of "
+                    "every boundary are multiplied by factors made from the Fourier transform of its profile "
+                    "(erf: r × exp(−2·kz₁kz₂·σ²), t·t′ × exp((kz₁ − kz₂)²σ²); lin and exp alike). No slices — the slice "
+                    "thickness is not used. Good while σ is well below the layer thicknesses; for overlapping "
+                    "transitions or intermixing use 'slices'.")
+            if interface.chaos > 0:
+                text += f"  Chaos: every boundary's σ varies by ±{100 * interface.chaos:.0f} %."
+            return text
         media = [(f"{m.name or '—'} upper", m) for m in self.materials] + [("substrate", self.substrate())]
         parts = [f"{name} (σ {m.sigma:g} Å, {mix_text(m.profile)}): {interface.n_slices(m.sigma, m.profile) or 'sharp'}"
                  for name, m in media]
@@ -1247,8 +1262,8 @@ class MultilayerApp(QMainWindow):
         # ---- neutrons: METHOD 1 + METHOD 2.1 (the same calls the optimizer uses) ----
         k = self.v("k")
         ambient, substrate = self.ambient(), self.substrate()
-        potentials, thicknesses = build_stack(self.materials, N, ambient, substrate, interface)
-        R = neutron_reflectivity(potentials, thicknesses, q)
+        potentials, thicknesses, roughness = build_stack(self.materials, N, ambient, substrate, interface)
+        R = neutron_reflectivity(potentials, thicknesses, q, roughness)
         self.mean_R = mean_reflectivity(R, q, q_top)
         near_edge = q >= self.v("edge_fraction") * q_top
         edge_R = mean_reflectivity(R[near_edge], q[near_edge], q_top)
@@ -1257,8 +1272,9 @@ class MultilayerApp(QMainWindow):
         # ---- X-rays: METHOD 1 with ε + METHOD 2.2 — the same structure (same slices) ----
         wavelength = self.v("lambda_x")
         k_x = 2 * np.pi / wavelength
-        epsilons, _ = build_stack(self.materials, N, ambient, substrate, interface, quantity="epsilon")
-        R_x = xray_reflectivity(epsilons, thicknesses, q_x, wavelength, self.v("polarization"))
+        epsilons, _, roughness_x = build_stack(self.materials, N, ambient, substrate, interface, quantity="epsilon")
+        R_x = xray_reflectivity(epsilons, thicknesses, q_x, wavelength, self.v("polarization"), roughness_x)
+        n_steps = len(potentials) - 2                        # layers or slices the reflectivity went through
         densest = max(self.materials, key=lambda mat: 1.0 - mat.epsilon.real)
         q_cx = xray_critical_q(densest.epsilon, wavelength)
 
@@ -1304,10 +1320,15 @@ class MultilayerApp(QMainWindow):
                    f"same structure, ε from the material cards", Q_LABEL, "Reflectivity <i>R</i>")
         panel.place_legend(a, "upper right")
 
-        # ---- depth profiles of the same structure ----
+        # ---- depth profiles of the same structure: always the graded (rough) profile ----
+        if interface.method == "factor":
+            potentials, thicknesses, _ = build_stack(self.materials, N, ambient, substrate, interface, graded=True)
+            epsilons, _, _ = build_stack(self.materials, N, ambient, substrate, interface, quantity="epsilon", graded=True)
         self.lbl_slices.setText(self.slicing_summary(interface, d_max, q_highest))
         panel.draw_profile(panel.potential, potentials, thicknesses, self.v("z_pad"), colors["potential"])
-        style_plot(panel.potential, colors["axes"], f"Neutron potential <i>V</i>(z) ({len(potentials) - 2} slices)",
+        how = (f"{n_steps} slices" if interface.method == "slices" else
+               f"{n_steps} sharp layers × roughness factor; graded profile shown")
+        style_plot(panel.potential, colors["axes"], f"Neutron potential <i>V</i>(z) ({how})",
                    Z_LABEL, "Potential <i>V</i> (µeV)")
         panel.draw_profile(panel.epsilon, (1.0 - epsilons.real) * 1e5, thicknesses, self.v("z_pad"), colors["epsilon"])
         style_plot(panel.epsilon, colors["axes"], "X-ray permittivity: 1 − Re ε(z)", Z_LABEL, "(1 − Re ε) × 10<sup>5</sup>")

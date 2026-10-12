@@ -4,11 +4,23 @@ calculation.py — physics of the multilayer mirror (no GUI code)
     Material                 one material of the repeating unit: name, potential, ε, thickness law,
                              roughness σ and profile (erf / lin / exp mix) of its upper boundary
     step_fraction(), reach() the shape of one rough boundary: weighted mix of erf, linear and exponential steps
-    Interface                how the rough boundaries are sliced, optional chaos
-    build_stack(...)         METHOD 1:   materials + N + ambient + substrate + interface -> values[], thicknesses[]
+    profile_transform(), roughness_factors()   the same shape in q space: Fourier transform of the step's
+                             derivative, and the factors it gives a boundary's reflection and transmission
+    Interface                how roughness is calculated ("factor" or "slices"), slicing, optional chaos
+    build_stack(...)         METHOD 1:   materials + N + ambient + substrate + interface
+                                         -> values[], thicknesses[], roughness
                                          (values = neutron potentials V or X-ray permittivities ε of the same structure)
-    neutron_reflectivity()   METHOD 2.1: potentials[], thicknesses[], q[]          ->  R(q) for neutrons
-    xray_reflectivity()      METHOD 2.2: permittivities[], thicknesses[], q[], λ   ->  R(q) for X-rays
+    neutron_reflectivity()   METHOD 2.1: potentials[], thicknesses[], q[], roughness          ->  R(q) for neutrons
+    xray_reflectivity()      METHOD 2.2: permittivities[], thicknesses[], q[], λ, roughness   ->  R(q) for X-rays
+
+Two ways to include the roughness (Interface.method):
+    "factor"  sharp layers; the reflection and transmission of every boundary are multiplied by factors made
+              from the Fourier transform of its roughness profile (convolution in z = multiplication in q).
+              Fast: one step per layer. The idea of Multifitting (Svechnikov 2020, Eq. 2), here with the
+              Névot–Croce / Vidal–Vincent form. Good while σ is well below the layer thicknesses.
+    "slices"  the rough profile itself (convolution of the sharp profile with the roughness), cut into thin
+              slices. Exact also when neighbouring transitions overlap or the layers intermix, but slow:
+              thousands of slices instead of one step per layer.
     energy_from_k(), k_from_energy(), glancing_angle(), q_from_angle()   neutron beam conversions
     xray_wavelength(), xray_energy()                                    X-ray beam conversions
 
@@ -155,6 +167,45 @@ def step_fraction(x, sigma, weights):
     return F
 
 
+def profile_transform(Q2, sigma, weights):
+    """
+    Fourier transform of the derivative of the mixed step (step_fraction) at wave vector Q, given Q² (may be
+    complex): how much of a boundary's sharp reflection survives the roughness.
+        erf   exp(−Q²σ²/2)
+        lin   sin(√3·σ·Q) / (√3·σ·Q)
+        exp   1 / (1 + Q²σ²/2)
+    (Svechnikov 2020, Table 2, with Q = 2·kz.) The mix uses the same normalized weights as step_fraction:
+    the transform of a sum is the sum of the transforms.
+    """
+    w = profile_weights(weights)
+    Q2 = np.asarray(Q2, dtype=complex)
+    result = np.zeros(Q2.shape, dtype=complex)
+    if w[0] > 0:
+        result += w[0] * np.exp(-Q2 * sigma**2 / 2.0)
+    if w[1] > 0:
+        u = math.sqrt(3.0) * sigma * np.sqrt(Q2)
+        small = np.abs(u) < 1e-9
+        result += w[1] * np.where(small, 1.0, np.sin(u) / np.where(small, 1.0, u))
+    if w[2] > 0:
+        result += w[2] / (1.0 + Q2 * sigma**2 / 2.0)
+    return result
+
+
+def roughness_factors(kz_upper, kz_lower, sigma, weights):
+    """
+    Factors of a rough boundary for the Parratt recursion (Névot–Croce for r, Vidal–Vincent for t,
+    written with the transform of the chosen profile, so erf / lin / exp mixes work the same way):
+        r  -> r⁰ · W,          W = transform(Q² = 4·kz_upper·kz_lower)
+        t·t' -> (1 − r⁰²) · T,   T = 1 / transform(Q² = (kz_upper − kz_lower)²)²
+    For erf: W = exp(−2·kz_u·kz_l·σ²), T = exp((kz_u − kz_l)²·σ²).
+    The transmission part matters below the critical edges (evanescent layers); without it (r only) R can
+    even exceed 1 there.
+    """
+    W = profile_transform(4.0 * kz_upper * kz_lower, sigma, weights)
+    T = 1.0 / profile_transform((kz_upper - kz_lower) ** 2, sigma, weights) ** 2
+    return W, T
+
+
 def reach(sigma, weights):
     """Distance from the boundary centre beyond which the mixed step is complete: the widest step used."""
     w = profile_weights(weights)
@@ -166,7 +217,7 @@ def reach(sigma, weights):
 # ==============================================================================
 class Interface:
     """
-    How the rough boundaries of the stack are cut into slices. The roughness itself belongs to the media
+    How the roughness of the boundaries is calculated. The roughness itself belongs to the media
     (as in Multifitting): material.sigma and material.profile describe the UPPER boundary of every layer of
     that material, substrate.sigma / substrate.profile the boundary between the last layer and the substrate.
 
@@ -176,14 +227,17 @@ class Interface:
     the roughness distribution. So when σ reaches the layer thickness the contrast between the
     materials fades, and for σ ≫ period the stack becomes the average (fully intermixed) medium.
 
-    slice_thickness   each transition (z_b − reach … z_b + reach) is cut into n = ⌈2·reach / d⌉ equal
+    method    "factor": sharp layers, reflection and transmission × roughness_factors (fast, like Multifitting)
+              "slices": the blurred profile below, cut into slices (exact for overlapping transitions, slow)
+    slice_thickness   ("slices" only) each transition (z_b − reach … z_b + reach) is cut into n = ⌈2·reach / d⌉ equal
               slices of thickness ≤ d (Å). Equal slices act as a grating with a false Bragg peak at
               q = 2π/d, so keep d ≤ π/(4·q_max). A boundary with σ = 0 stays a sharp step (no slices).
     chaos     0 … 1: every boundary gets its own width σ_b · (1 + chaos·u), u random in [−1, 1]
     seed      start of the random numbers — same seed, same structure (reproducible curves and gradients)
     """
 
-    def __init__(self, slice_thickness=2.0, chaos=0.0, seed=1):
+    def __init__(self, method="factor", slice_thickness=2.0, chaos=0.0, seed=1):
+        self.method = method
         self.slice_thickness = float(slice_thickness)
         self.chaos = float(chaos)
         self.seed = int(seed)
@@ -196,30 +250,34 @@ class Interface:
 # ==============================================================================
 # METHOD 1: the layer stack
 # ==============================================================================
-def build_stack(materials, N, ambient, substrate, interface, quantity="potential"):
+def build_stack(materials, N, ambient, substrate, interface, quantity="potential", graded=None):
     """
-    Returns two arrays of equal length, ordered from the ambient medium (first element)
-    to the substrate (last element):
+    Returns three things, ordered from the ambient medium (first element) to the substrate (last element):
 
         values       quantity = "potential": neutron potentials V (µeV)
                      quantity = "epsilon":   X-ray permittivities ε (complex)
         thicknesses  (Å)    — ambient and substrate are semi-infinite and get 0
+        roughness    (widths σ_b, profiles w_b) of every boundary b, for the reflectivity methods;
+                     None when the roughness is already in the values (graded stack)
 
     ambient, substrate: Material objects for the media above and below the stack
-    (only their potential / epsilon and, for the substrate, sigma are used).
+    (only their potential / epsilon and, for the substrate, sigma and profile are used).
     Both quantities go through the same steps, so neutrons and X-rays see the same structure.
 
     1. Sharp stack: N periods of all materials in list order; period k uses material.thicknesses(N)[k].
        Every boundary gets the σ and profile of the medium below it. Layers with thickness ≤ 0 (a negative
        polynomial, or a material missing from a period of a file structure) are left out.
-    2. Rough stack: every boundary with σ > 0 is blurred (see Interface, step_fraction) and cut into
-       Interface.n_slices(σ, profile) slices; the flat middle of a layer stays one slice.
-       Total slices ≈ Σ over boundaries of n_slices + one per layer middle.
+       Chaos: every σ_b is changed by its own random factor (1 + chaos·u).
+       interface.method == "factor" (and graded not True): this sharp stack is returned with its roughness.
+    2. Graded stack (method "slices", or graded=True e.g. for the depth plots): every boundary with σ > 0 is
+       blurred (step_fraction) and cut into Interface.n_slices(σ, profile) slices; the flat middle of a layer
+       stays one slice. Total slices ≈ Σ over boundaries of n_slices + one per layer middle.
     """
-    # ---- 1. sharp stack: value of every medium, depth and roughness of every boundary ----
+    # ---- 1. sharp stack: value of every medium, depth, roughness and profile of every boundary ----
     values = [getattr(ambient, quantity)]
     boundaries, sigmas, shapes = [], [], []                 # top of each layer (then the substrate), its σ and profile
     z = 0.0
+    layer_thickness = []
     thickness_arrays = [material.thicknesses(N) for material in materials]   # each: N values, top period first
     for period in range(N):                                 # from the ambient side down to the substrate
         for material, d in zip(materials, thickness_arrays):
@@ -229,16 +287,22 @@ def build_stack(materials, N, ambient, substrate, interface, quantity="potential
             sigmas.append(material.sigma)                   # upper boundary of this layer
             shapes.append(material.profile)
             values.append(getattr(material, quantity))      # material.potential or material.epsilon
+            layer_thickness.append(d[period])
             z += d[period]
     boundaries.append(z)
     sigmas.append(substrate.sigma)
     shapes.append(substrate.profile)
     values.append(getattr(substrate, quantity))
 
-    # ---- 2. rough stack ----
     random = np.random.default_rng(interface.seed)
     widths = np.array(sigmas) * (1.0 + interface.chaos * random.uniform(-1.0, 1.0, len(boundaries)))
     widths = np.maximum(widths, 0.0)
+
+    if not (graded or (graded is None and interface.method == "slices")):
+        thicknesses = np.array([0.0] + layer_thickness + [0.0])
+        return np.array(values), thicknesses, (widths, shapes)
+
+    # ---- 2. graded stack ----
     jumps = np.diff(values)                                 # jump of V (or ε) at every boundary
 
     # slice edges: all boundaries + n_slices(σ_b) equal slices across every rough transition
@@ -263,69 +327,107 @@ def build_stack(materials, N, ambient, substrate, interface, quantity="potential
 
     values = np.concatenate(([values[0]], smooth, [values[-1]]))
     thicknesses = np.concatenate(([0.0], np.diff(edges), [0.0]))
-    return values, thicknesses
+    return values, thicknesses, None
+
+
+# ==============================================================================
+# The Parratt recursion (used by METHOD 2.1 and 2.2)
+# ==============================================================================
+def parratt(values, thicknesses, kz_of, fresnel, roughness=None):
+    """
+    Specular reflectivity |r|² of the stack, starting inside the substrate (no reflected wave there) and
+    working up to the ambient medium. At boundary j (medium j above, j+1 below):
+
+        X_j = [r_j + (t_j·t'_j + r_j²)·X_j+1·p] / [1 + r_j·X_j+1·p],   p = exp(2i·kz_j+1·d_j+1)
+
+    p is the round trip through layer j+1. For a sharp boundary t·t' = 1 − r², which gives the usual
+    X_j = (r_j + X_j+1·p) / (1 + r_j·X_j+1·p).
+
+    kz_of(value)                   z component of the wave number in a medium with this V or ε (array over q)
+    fresnel(kz_u, kz_l, v_u, v_l)  Fresnel reflection coefficient of the boundary upper / lower
+    roughness = (σ_b, profile_b) of every boundary (sharp stack): r and t·t' get the roughness_factors.
+
+    For a sharp stack kz is computed once per distinct medium (there are only a few) and the roughness
+    factors once per distinct (medium above, medium below, σ, profile).
+    """
+    kz_cache, factor_cache = {}, {}
+
+    def kz(value):
+        if roughness is None:                               # graded stack: (almost) every slice is different
+            return kz_of(value)
+        if value not in kz_cache:
+            kz_cache[value] = kz_of(value)
+        return kz_cache[value]
+
+    X = 0.0                                                 # reflection amplitude below the current boundary
+    kz_lower, v_lower = kz(values[-1]), values[-1]
+    for j in range(len(values) - 2, -1, -1):
+        v_upper = values[j]
+        kz_upper = kz(v_upper)
+        r0 = fresnel(kz_upper, kz_lower, v_upper, v_lower)  # sharp boundary j / j+1
+        r, tt = r0, 1.0 - r0 * r0
+        if roughness is not None and roughness[0][j] > 0:
+            key = (v_upper, v_lower, float(roughness[0][j]), tuple(roughness[1][j]))
+            if key not in factor_cache:
+                factor_cache[key] = roughness_factors(kz_upper, kz_lower, roughness[0][j], roughness[1][j])
+            W, T = factor_cache[key]
+            r, tt = r0 * W, (1.0 - r0 * r0) * T
+        if j + 1 < len(values) - 1:                         # a layer below this boundary (not the substrate)
+            Xp = X * np.exp(2j * kz_lower * thicknesses[j + 1])
+            X = (r + (tt + r * r) * Xp) / (1.0 + r * Xp)
+        else:
+            X = r
+        kz_lower, v_lower = kz_upper, v_upper
+    R = np.abs(X) ** 2
+    if roughness is not None:
+        # the factors are an approximation: at narrow resonances below a critical edge they can overshoot
+        # the physical limit R = 1 by about 1–2 % (σ ≤ 0.1 of the layer thickness); R never exceeds 1
+        R = np.minimum(R, 1.0)
+    return R
 
 
 # ==============================================================================
 # METHOD 2.1: the neutron reflectivity
 # ==============================================================================
-def neutron_reflectivity(potentials, thicknesses, q):
+def neutron_reflectivity(potentials, thicknesses, q, roughness=None):
     """
-    Specular neutron reflectivity R(q) of the stack by the Parratt recursion.
-    Starts inside the substrate (no reflected wave) and works up to the vacuum.
+    Specular neutron reflectivity R(q) of the stack (Parratt recursion).
+    kz² = (q/2)² − KZ2_PER_UEV·V,   r = (kz_upper − kz_lower) / (kz_upper + kz_lower).
+    roughness: the third result of build_stack (None for a graded stack).
     """
     q = np.asarray(q, dtype=float)
-
-    def kz(V):
-        return np.sqrt((q / 2.0) ** 2 - KZ2_PER_UEV * V + 0j)
-
-    X = np.zeros(q.size, dtype=complex)                     # reflection amplitude below the current interface
-    kz_lower = kz(potentials[-1])
-    for i in range(len(potentials) - 2, -1, -1):
-        kz_upper = kz(potentials[i])
-        r = (kz_upper - kz_lower) / (kz_upper + kz_lower)   # Fresnel coefficient of interface i / i+1
-        phase = np.exp(2j * kz_lower * thicknesses[i + 1])  # round trip through layer i+1
-        X = (r + X * phase) / (1.0 + r * X * phase)
-        kz_lower = kz_upper
-    return np.abs(X) ** 2
+    return parratt(potentials, thicknesses,
+                   kz_of=lambda V: np.sqrt((q / 2.0) ** 2 - KZ2_PER_UEV * V + 0j),
+                   fresnel=lambda ku, kl, vu, vl: (ku - kl) / (ku + kl),
+                   roughness=roughness)
 
 
 # ==============================================================================
 # METHOD 2.2: the X-ray reflectivity
 # ==============================================================================
-def xray_reflectivity(epsilons, thicknesses, q, wavelength, polarization="s"):
+def xray_reflectivity(epsilons, thicknesses, q, wavelength, polarization="s", roughness=None):
     """
     Specular X-ray reflectivity R(q) of the stack — METHOD 2.1 with the potentials replaced by the
     dielectric permittivities, following Svechnikov, J. Appl. Cryst. 53 (2020), Eq. (1):
 
-        r(z_j) = [r_j + r(z_j+1)·exp(2iχ_j+1·l_j+1)] / [1 + r_j·r(z_j+1)·exp(2iχ_j+1·l_j+1)],   r(z_N+1) = 0
-        χ_j    = k·(ε_j − cos²φ)^½      z component of the wave number in medium j
-        k = 2π/λ,  φ = glancing angle,  q = 2k·sin φ  (so cos²φ = 1 − (q/2k)²),  l_j = thickness of layer j
+        χ_j = k·(ε_j − cos²φ)^½      z component of the wave number in medium j
+        k = 2π/λ,  φ = glancing angle,  q = 2k·sin φ  (so cos²φ = 1 − (q/2k)²)
 
     r_j is the Fresnel coefficient of boundary j / j+1:
         s-polarization:  r_j = (χ_j − χ_j+1) / (χ_j + χ_j+1)
         p-polarization:  r_j = (ε_j+1·χ_j − ε_j·χ_j+1) / (ε_j+1·χ_j + ε_j·χ_j+1)
     (Since (q/2)² = k² sin²φ, χ_j² = (q/2)² − k²(1 − ε_j): the neutron formula with K·V replaced by k²(1 − ε).)
+    roughness: the third result of build_stack (None for a graded stack).
     """
     q = np.asarray(q, dtype=float)
     k = 2.0 * np.pi / wavelength
     cos2_phi = 1.0 - (q / (2.0 * k)) ** 2
-
-    def chi(eps):
-        return k * np.sqrt(eps - cos2_phi + 0j)
-
-    X = np.zeros(q.size, dtype=complex)                     # r(z_N+1) = 0: no reflection from inside the substrate
-    chi_lower, eps_lower = chi(epsilons[-1]), epsilons[-1]
-    for j in range(len(epsilons) - 2, -1, -1):
-        chi_upper, eps_upper = chi(epsilons[j]), epsilons[j]
-        if polarization == "p":
-            r = (eps_lower * chi_upper - eps_upper * chi_lower) / (eps_lower * chi_upper + eps_upper * chi_lower)
-        else:
-            r = (chi_upper - chi_lower) / (chi_upper + chi_lower)
-        phase = np.exp(2j * chi_lower * thicknesses[j + 1])  # round trip through layer j+1
-        X = (r + X * phase) / (1.0 + r * X * phase)
-        chi_lower, eps_lower = chi_upper, eps_upper
-    return np.abs(X) ** 2
+    if polarization == "p":
+        fresnel = lambda cu, cl, eu, el: (el * cu - eu * cl) / (el * cu + eu * cl)
+    else:
+        fresnel = lambda cu, cl, eu, el: (cu - cl) / (cu + cl)
+    return parratt(epsilons, thicknesses, kz_of=lambda eps: k * np.sqrt(eps - cos2_phi + 0j),
+                   fresnel=fresnel, roughness=roughness)
 
 
 # ==============================================================================
