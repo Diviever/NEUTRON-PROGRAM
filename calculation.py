@@ -6,7 +6,8 @@ calculation.py — physics of the multilayer mirror (no GUI code)
     step_fraction(), reach() the shape of one rough boundary: weighted mix of erf, linear and exponential steps
     profile_transform(), roughness_factors()   the same shape in q space: Fourier transform of the step's
                              derivative, and the factors it gives a boundary's reflection and transmission
-    Interface                how roughness is calculated ("factor" or "slices"), slicing, optional chaos
+    Interface                the non-ideal parts of the stack: how roughness is calculated ("factor" or
+                             "slices"), slicing, chaos of σ, random thickness errors of the layers
     build_stack(...)         METHOD 1:   materials + N + ambient + substrate + interface
                                          -> values[], thicknesses[], roughness
                                          (values = neutron potentials V or X-ray permittivities ε of the same structure)
@@ -217,7 +218,8 @@ def reach(sigma, weights):
 # ==============================================================================
 class Interface:
     """
-    How the roughness of the boundaries is calculated. The roughness itself belongs to the media
+    The non-ideal parts of the stack: random thickness errors of the layers and how the roughness of the
+    boundaries is calculated. The roughness itself belongs to the media
     (as in Multifitting): material.sigma and material.profile describe the UPPER boundary of every layer of
     that material, substrate.sigma / substrate.profile the boundary between the last layer and the substrate.
 
@@ -233,14 +235,35 @@ class Interface:
               slices of thickness ≤ d (Å). Equal slices act as a grating with a false Bragg peak at
               q = 2π/d, so keep d ≤ π/(4·q_max). A boundary with σ = 0 stays a sharp step (no slices).
     chaos     0 … 1: every boundary gets its own width σ_b · (1 + chaos·u), u random in [−1, 1]
-    seed      start of the random numbers — same seed, same structure (reproducible curves and gradients)
+    thickness_error   relative random error of every layer thickness (0.02 = 2 %): d → d·(1 + e), with e
+              "gauss":   normal distribution, standard deviation = thickness_error
+              "uniform": evenly between −thickness_error and +thickness_error (standard deviation = error/√3)
+              The errors are applied to the ideal thicknesses first; the roughness then sits on the boundaries
+              of this real stack.
+    seed      start of the random numbers — same seed, same structure (reproducible curves and gradients).
+              Another seed gives another realization of the errors (thickness and chaos).
     """
 
-    def __init__(self, method="factor", slice_thickness=2.0, chaos=0.0, seed=1):
+    def __init__(self, method="factor", slice_thickness=2.0, chaos=0.0, seed=1,
+                 thickness_error=0.0, error_shape="gauss"):
         self.method = method
         self.slice_thickness = float(slice_thickness)
         self.chaos = float(chaos)
         self.seed = int(seed)
+        self.thickness_error = float(thickness_error)
+        self.error_shape = error_shape
+
+    def thickness_factors(self, n_layers):
+        """1 + e for each of the n layers (all 1 without errors); its own random stream, so chaos and the
+        thickness errors do not change each other's realization."""
+        if self.thickness_error <= 0:
+            return np.ones(n_layers)
+        random = np.random.default_rng([self.seed, 1])
+        if self.error_shape == "uniform":
+            e = random.uniform(-1.0, 1.0, n_layers)
+        else:
+            e = random.standard_normal(n_layers)
+        return 1.0 + self.thickness_error * e
 
     def n_slices(self, sigma_b, weights):
         """Number of slices across one transition of width σ_b and this profile (0 for a sharp boundary)."""
@@ -267,6 +290,7 @@ def build_stack(materials, N, ambient, substrate, interface, quantity="potential
     1. Sharp stack: N periods of all materials in list order; period k uses material.thicknesses(N)[k].
        Every boundary gets the σ and profile of the medium below it. Layers with thickness ≤ 0 (a negative
        polynomial, or a material missing from a period of a file structure) are left out.
+       Thickness errors: every layer thickness × its own random factor (1 + e) (Interface.thickness_factors).
        Chaos: every σ_b is changed by its own random factor (1 + chaos·u).
        interface.method == "factor" (and graded not True): this sharp stack is returned with its roughness.
     2. Graded stack (method "slices", or graded=True e.g. for the depth plots): every boundary with σ > 0 is
@@ -275,21 +299,20 @@ def build_stack(materials, N, ambient, substrate, interface, quantity="potential
     """
     # ---- 1. sharp stack: value of every medium, depth, roughness and profile of every boundary ----
     values = [getattr(ambient, quantity)]
-    boundaries, sigmas, shapes = [], [], []                 # top of each layer (then the substrate), its σ and profile
-    z = 0.0
+    sigmas, shapes = [], []                                 # σ and profile of the upper boundary of each layer
     layer_thickness = []
     thickness_arrays = [material.thicknesses(N) for material in materials]   # each: N values, top period first
     for period in range(N):                                 # from the ambient side down to the substrate
         for material, d in zip(materials, thickness_arrays):
             if d[period] <= 0:
                 continue
-            boundaries.append(z)
             sigmas.append(material.sigma)                   # upper boundary of this layer
             shapes.append(material.profile)
             values.append(getattr(material, quantity))      # material.potential or material.epsilon
             layer_thickness.append(d[period])
-            z += d[period]
-    boundaries.append(z)
+    # the real thicknesses: ideal × (1 + random error); then the depth of every boundary
+    layer_thickness = list(np.maximum(np.array(layer_thickness) * interface.thickness_factors(len(layer_thickness)), 0.0))
+    boundaries = list(np.concatenate(([0.0], np.cumsum(layer_thickness))))   # top of each layer, then the substrate
     sigmas.append(substrate.sigma)
     shapes.append(substrate.profile)
     values.append(getattr(substrate, quantity))

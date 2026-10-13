@@ -48,7 +48,7 @@ from calculation import (Material, Interface, build_stack, neutron_reflectivity,
                          xray_wavelength, xray_energy)
 from optimizer import M_REFERENCE, reference_for_m, hayter_mook_start, GradientDescent, optimize
 from gui_style import THEMES, colors
-from plots import PlotPanel, MiniPlot, style_plot, DASH, DOT
+from plots import PlotPanel, MiniPlot, framed, style_plot, DASH, DOT
 from structure_file import (LIBRARY_DIR, load_library, sheet_names, read_layers, periodic_materials,
                             read_thickness_file, read_xy)
 
@@ -105,6 +105,17 @@ def program_icon():
         if (folder / name).exists():
             return QIcon(str(folder / name))
     return QIcon()
+
+
+def number_entry(lo, hi, step, decimals, width, tip=""):
+    """Number entry of the material cards, like the parameter entries: mouse wheel and arrows change it."""
+    entry = QDoubleSpinBox()
+    entry.setRange(lo, hi)
+    entry.setDecimals(decimals)
+    entry.setSingleStep(step)
+    entry.setMaximumWidth(width)
+    entry.setToolTip(tip)
+    return entry
 
 
 def mix_text(weights):
@@ -182,8 +193,7 @@ class LayerCard(QFrame):
         self.set_library(library or {})
         head.addWidget(self.cmb_name)
         head.addWidget(QLabel("V (µeV):"))
-        self.ed_pot = QLineEdit()
-        self.ed_pot.setMaximumWidth(70)
+        self.ed_pot = number_entry(-10.0, 10.0, 0.001, 4, 85, "Neutron potential of the material (µeV)")
         head.addWidget(self.ed_pot)
         head.addStretch(1)
         self.btn_remove = QPushButton("✕")
@@ -195,14 +205,11 @@ class LayerCard(QFrame):
         # ---- X-ray permittivity: ε = real + i·imag ----
         eps_row = QHBoxLayout()
         eps_row.addWidget(QLabel("X-ray  ε ="))
-        self.ed_eps_re = QLineEdit()
-        self.ed_eps_re.setMaximumWidth(100)
-        self.ed_eps_re.setToolTip("Real part of the dielectric permittivity at the X-ray energy in use")
+        self.ed_eps_re = number_entry(0.5, 1.5, 1e-6, 9, 115,
+                                      "Real part of the dielectric permittivity at the X-ray energy in use")
         eps_row.addWidget(self.ed_eps_re)
         eps_row.addWidget(QLabel("+ i"))
-        self.ed_eps_im = QLineEdit()
-        self.ed_eps_im.setMaximumWidth(90)
-        self.ed_eps_im.setToolTip("Imaginary part (absorption, > 0)")
+        self.ed_eps_im = number_entry(0.0, 0.1, 1e-7, 11, 125, "Imaginary part (absorption, > 0)")
         eps_row.addWidget(self.ed_eps_im)
         eps_row.addStretch(1)
         outer.addLayout(eps_row)
@@ -210,9 +217,8 @@ class LayerCard(QFrame):
         # ---- upper boundary of every layer of this material: width σ and shape (mix of erf, lin, exp) ----
         rough_row = QHBoxLayout()
         rough_row.addWidget(QLabel("Upper boundary σ (Å)"))
-        self.ed_sigma = QLineEdit()
-        self.ed_sigma.setMaximumWidth(55)
-        self.ed_sigma.setToolTip("rms roughness of the upper boundary of every layer of this material (0 = sharp)")
+        self.ed_sigma = number_entry(0.0, 1000.0, 0.5, 2, 70,
+                                     "rms roughness of the upper boundary of every layer of this material (0 = sharp)")
         rough_row.addWidget(self.ed_sigma)
         rough_row.addSpacing(6)
         tips = {"erf": "error-function step: Gaussian roughness, smooth on both sides",
@@ -221,10 +227,9 @@ class LayerCard(QFrame):
         self.profile_edits = []
         for name in PROFILE_NAMES:
             rough_row.addWidget(QLabel(name))
-            entry = QLineEdit()
-            entry.setMaximumWidth(36)
-            entry.setToolTip(f"Weight 0 … 1 of the {tips[name]}. The boundary is the weighted mix of the three "
-                             f"steps (all with the same σ); the weights are divided by their sum.")
+            entry = number_entry(0.0, 1.0, 0.1, 2, 58,
+                                 f"Weight 0 … 1 of the {tips[name]}. The boundary is the weighted mix of the three "
+                                 f"steps (all with the same σ); the weights are divided by their sum.")
             rough_row.addWidget(entry)
             self.profile_edits.append(entry)
         self.lbl_mix = QLabel("")
@@ -248,10 +253,8 @@ class LayerCard(QFrame):
         linear_page = QWidget()
         lg = QGridLayout(linear_page)
         lg.setContentsMargins(0, 0, 0, 0)
-        self.ed_start = QLineEdit()
-        self.ed_end = QLineEdit()
-        self.ed_start.setMaximumWidth(90)
-        self.ed_end.setMaximumWidth(90)
+        self.ed_start = number_entry(-10000.0, 100000.0, 1.0, 2, 100, "Thickness (Å) of the period on the substrate (t = 0)")
+        self.ed_end = number_entry(-10000.0, 100000.0, 1.0, 2, 100, "Thickness (Å) of the top period (t = 1)")
         lg.addWidget(QLabel("d_start (Å):"), 0, 0)
         lg.addWidget(self.ed_start, 0, 1)
         lg.addWidget(QLabel("d_end (Å):"), 1, 0)
@@ -279,8 +282,7 @@ class LayerCard(QFrame):
         grid = QGridLayout()
         self.coef_labels, self.coef_edits = [], []
         for k in range(MAX_DEGREE + 1):
-            label, entry = QLabel(f"c{k}:"), QLineEdit()
-            entry.setMaximumWidth(80)
+            label, entry = QLabel(f"c{k}:"), number_entry(-1e6, 1e6, 1.0, 6, 110, f"Coefficient of t^{k} (Å)")
             grid.addWidget(label, k // 2, 2 * (k % 2))
             grid.addWidget(entry, k // 2, 2 * (k % 2) + 1)
             self.coef_labels.append(label)
@@ -313,7 +315,7 @@ class LayerCard(QFrame):
         body.addLayout(left, 1)
 
         self.plot = MiniPlot()                               # thickness in every period
-        body.addWidget(self.plot)
+        body.addWidget(framed(self.plot))
         outer.addLayout(body)
 
         self.lbl_warn = QLabel("")
@@ -322,8 +324,9 @@ class LayerCard(QFrame):
 
         # ---- connections ----
         for entry in [self.ed_pot, self.ed_eps_re, self.ed_eps_im, self.ed_sigma,
-                      self.ed_start, self.ed_end, self.ed_user] + self.profile_edits + self.coef_edits:
-            entry.textChanged.connect(self.read_entries)
+                      self.ed_start, self.ed_end] + self.profile_edits + self.coef_edits:
+            entry.valueChanged.connect(self.read_entries)
+        self.ed_user.textChanged.connect(self.read_entries)
         self.cmb_name.editTextChanged.connect(self.read_entries)
         self.cmb_name.activated.connect(self.on_library_choice)
         self.cmb_mode.currentIndexChanged.connect(self.on_mode_changed)
@@ -365,17 +368,16 @@ class LayerCard(QFrame):
             return
         mat = self.material
         mat.name = self.cmb_name.currentText().strip()
-        mat.potential = safe_float(self.ed_pot.text(), mat.potential)
-        mat.epsilon = complex(safe_float(self.ed_eps_re.text(), mat.epsilon.real),
-                              safe_float(self.ed_eps_im.text(), mat.epsilon.imag))
-        mat.sigma = max(safe_float(self.ed_sigma.text(), mat.sigma), 0.0)
+        mat.potential = self.ed_pot.value()
+        mat.epsilon = complex(self.ed_eps_re.value(), self.ed_eps_im.value())
+        mat.sigma = self.ed_sigma.value()
         for k, entry in enumerate(self.profile_edits):
-            mat.profile[k] = min(max(safe_float(entry.text(), mat.profile[k]), 0.0), 1.0)
+            mat.profile[k] = entry.value()
         self.lbl_mix.setText("= " + mix_text(mat.profile))
-        mat.linear[0] = safe_float(self.ed_start.text(), mat.linear[0])
-        mat.linear[1] = safe_float(self.ed_end.text(), mat.linear[1])
+        mat.linear[0] = self.ed_start.value()
+        mat.linear[1] = self.ed_end.value()
         for k in range(len(mat.poly)):
-            mat.poly[k] = safe_float(self.coef_edits[k].text(), mat.poly[k])
+            mat.poly[k] = self.coef_edits[k].value()
         user = [safe_float(x, None) for x in self.ed_user.text().replace(";", " ").split()]
         if user and None not in user:
             mat.user = np.array(user)
@@ -407,15 +409,15 @@ class LayerCard(QFrame):
         degree = len(mat.poly) - 1
         self._showing = True
         self.cmb_name.setEditText(mat.name)
-        self.ed_pot.setText(f"{mat.potential:.4f}")
-        self.ed_eps_re.setText(f"{mat.epsilon.real:.9f}")
-        self.ed_eps_im.setText(f"{mat.epsilon.imag:.4e}")
-        self.ed_sigma.setText(f"{mat.sigma:g}")
+        self.ed_pot.setValue(mat.potential)
+        self.ed_eps_re.setValue(mat.epsilon.real)
+        self.ed_eps_im.setValue(mat.epsilon.imag)
+        self.ed_sigma.setValue(mat.sigma)
         for weight, entry in zip(mat.profile, self.profile_edits):
-            entry.setText(f"{weight:g}")
+            entry.setValue(weight)
         self.lbl_mix.setText("= " + mix_text(mat.profile))
-        self.ed_start.setText(f"{mat.linear[0]:.2f}")
-        self.ed_end.setText(f"{mat.linear[1]:.2f}")
+        self.ed_start.setValue(mat.linear[0])
+        self.ed_end.setValue(mat.linear[1])
         page = {"linear": 0, "poly": 1, "user": 2}[mat.mode]
         self.cmb_mode.setCurrentIndex(page)
         self.pages.setCurrentIndex(page)
@@ -424,7 +426,7 @@ class LayerCard(QFrame):
         for k, (label, entry) in enumerate(zip(self.coef_labels, self.coef_edits)):
             label.setVisible(k <= degree)
             entry.setVisible(k <= degree)
-            entry.setText(f"{mat.poly[k]:.8g}" if k <= degree else "0")
+            entry.setValue(mat.poly[k] if k <= degree else 0.0)
         terms = ["c0", "c1·t"] + [f"c{k}·t{str(k).translate(SUPERSCRIPT)}" for k in range(2, degree + 1)]
         self.lbl_formula.setText("d(t) = " + " + ".join(terms))
         self._showing = False
@@ -476,6 +478,9 @@ PARAMETERS = [
     ("slice_d",        "Slice thickness d (Å)",      2.0,            0.05,    100.0,    0.5,     2,   "interface", "The smooth transitions are cut into slices of at most d. Equal slices act as a grating with a false peak at q = 2π/d, so the largest d accepted is π/(4·q max) of the plots (the peak then lies beyond 8·q max)"),
     ("chaos",          "Chaos 0…1",                  0.0,            0.0,     1.0,      0.05,    2,   "interface", "Every boundary gets its own width σ·(1 + chaos·u), u random in [−1, 1]"),
     ("seed",           "Random seed",                1,              0,       999999,   1,       0,   "interface", "Same seed = same random structure (reproducible curves); change it for another realization"),
+    ("thick_error",    "Thickness error (%)",        0.0,            0.0,     50.0,     0.5,     2,   "interface", "Random error of every layer thickness, in % of that thickness: d → d·(1 + e). Applied to the ideal stack first, then the roughness"),
+    ("error_shape",    "Error distribution",         ("Gaussian (σ = error)", "uniform (± error)"), None, None, None, None, "interface", "Gaussian: e has the standard deviation 'error'. Uniform: e lies evenly between −error and +error (standard deviation error/√3)"),
+    ("realizations",   "Random structures",          1,              1,       500,      1,       0,   "interface", "With thickness errors or chaos: calculate this many random structures (seeds seed, seed+1, …). The plots show their mean R and the 16–84 % band, the title ⟨R⟩ as mean ± standard deviation"),
 
     ("file_order",     "First row of the sheet is",  ("top (ambient side)", "bottom (substrate side)"), None, None, None, None, "file", "Order of the rows in the structure file"),
     ("file_sigma",     "σ upper of loaded layers (Å)", 3.0,          0.0,     1000.0,   0.5,     2,   "file",      "Roughness given to every layer read from the file (each card can be changed afterwards)"),
@@ -530,7 +535,7 @@ PARAMETERS = [
 
 GROUP_TITLES = {
     "structure": "Multilayer",
-    "interface": "Interfaces (roughness)",
+    "interface": "Interfaces & random errors",
     "file":      "Structure file (.xlsx)",
     "beam":      "Neutron beam",
     "xray":      "X-ray beam",
@@ -1208,11 +1213,15 @@ class MultilayerApp(QMainWindow):
             f"R ≈ {100 * r_low:.0f}–{100 * r_high:.0f} %.")
         self.schedule_update()
 
-    def interface(self):
-        """Interface object built from the entries of the 'Interfaces' group."""
+    def interface(self, seed=None):
+        """Interface object built from the entries of the 'Interfaces & random errors' group (another seed:
+        another realization of the random errors)."""
         method = "slices" if self.v("rough_method").startswith("slices") else "factor"
         self.params["slice_d"].setEnabled(method == "slices")            # only the slices use it
-        return Interface(method=method, slice_thickness=self.v("slice_d"), chaos=self.v("chaos"), seed=self.v("seed"))
+        return Interface(method=method, slice_thickness=self.v("slice_d"), chaos=self.v("chaos"),
+                         seed=self.v("seed") if seed is None else seed,
+                         thickness_error=self.v("thick_error") / 100.0,
+                         error_shape="uniform" if self.v("error_shape").startswith("uniform") else "gauss")
 
     def ambient(self):
         """The medium above the stack as a Material (its σ is not used: the top layer's σ is the surface)."""
@@ -1280,23 +1289,32 @@ class MultilayerApp(QMainWindow):
         q_highest = max(q[-1], q_x[-1])
         d_max = self.limit_slice_thickness(q_highest)
         interface = self.interface()
+        random_parts = self.v("thick_error") > 0 or self.v("chaos") > 0
+        n_real = self.v("realizations") if random_parts else 1   # without random errors all structures are the same
 
-        # ---- neutrons: METHOD 1 + METHOD 2.1 (the same calls the optimizer uses) ----
+        # ---- every random structure (seed, seed+1, …): METHOD 1 + METHOD 2.1 / 2.2 (the optimizer's calls) ----
         k = self.v("k")
+        wavelength = self.v("lambda_x")
+        k_x = 2 * np.pi / wavelength
         ambient, substrate = self.ambient(), self.substrate()
-        potentials, thicknesses, roughness = build_stack(self.materials, N, ambient, substrate, interface)
-        R = neutron_reflectivity(potentials, thicknesses, q, roughness)
-        self.mean_R = mean_reflectivity(R, q, q_top)
+        R_all, R_x_all = [], []
+        for i in range(n_real):
+            it = self.interface(seed=self.v("seed") + i)
+            potentials, thicknesses, roughness = build_stack(self.materials, N, ambient, substrate, it)
+            R_all.append(neutron_reflectivity(potentials, thicknesses, q, roughness))
+            epsilons, thicknesses_x, roughness_x = build_stack(self.materials, N, ambient, substrate, it, quantity="epsilon")
+            R_x_all.append(xray_reflectivity(epsilons, thicknesses_x, q_x, wavelength, self.v("polarization"), roughness_x))
+        n_steps = len(potentials) - 2                        # layers or slices the reflectivity went through
+        R_all, R_x_all = np.array(R_all), np.array(R_x_all)
+        means = [mean_reflectivity(r, q, q_top) for r in R_all]
+        self.mean_R, spread = float(np.mean(means)), float(np.std(means))
+        R, R_x = R_all.mean(axis=0), R_x_all.mean(axis=0)         # one structure: its curve; several: the mean curve
+        band = (np.percentile(R_all, 16, axis=0), np.percentile(R_all, 84, axis=0)) if n_real > 1 else None
+        band_x = (np.percentile(R_x_all, 16, axis=0), np.percentile(R_x_all, 84, axis=0)) if n_real > 1 else None
+        curve_label = "Parratt" if n_real == 1 else f"mean of {n_real} random structures"
         near_edge = q >= self.v("edge_fraction") * q_top
         edge_R = mean_reflectivity(R[near_edge], q[near_edge], q_top)
         ok = self.mean_R >= target
-
-        # ---- X-rays: METHOD 1 with ε + METHOD 2.2 — the same structure (same slices) ----
-        wavelength = self.v("lambda_x")
-        k_x = 2 * np.pi / wavelength
-        epsilons, _, roughness_x = build_stack(self.materials, N, ambient, substrate, interface, quantity="epsilon")
-        R_x = xray_reflectivity(epsilons, thicknesses, q_x, wavelength, self.v("polarization"), roughness_x)
-        n_steps = len(potentials) - 2                        # layers or slices the reflectivity went through
         densest = max(self.materials, key=lambda mat: 1.0 - mat.epsilon.real)
         q_cx = xray_critical_q(densest.epsilon, wavelength)
 
@@ -1318,7 +1336,7 @@ class MultilayerApp(QMainWindow):
         panel, log_scale, decades = self.plots, self.v("R_scale") == "log", self.v("log_decades")
         a = panel.neutron
         panel.draw_reflectivity(a, q, R, k, colors["neutron"], log_scale, decades, self.v("neutron_background"),
-                                measured_n, self.measured["neutron"] and self.measured["neutron"][0])
+                                measured_n, self.measured["neutron"] and self.measured["neutron"][0], band, curve_label)
         panel.add_range(a, 0.0, q_top, colors["range_ok"] if ok else colors["range_low"], colors["range_alpha"],
                         f"target range 0 … m·q<sub>c</sub> = {q_top:.4f} Å⁻¹")
         panel.add_vline(a, q_c, colors["q_c"], DASH, f"{qc_name} q<sub>c</sub> ({q_c:.4f} Å⁻¹)")
@@ -1327,25 +1345,26 @@ class MultilayerApp(QMainWindow):
         n_layers = sum(int(np.sum(m.thicknesses(N) > 0)) for m in self.materials)     # layers really in the stack
         style_plot(a, colors["axes"],
                    f"Neutrons · E = {self.v('energy'):.3f} meV · N = {N} ({n_layers} layers)<br>"
-                   f"⟨R⟩(0…m·q<sub>c</sub>) = {self.mean_R:.4f} {'✓' if ok else '✗'} (target {target:.3f})<br>"
-                   f"R near m·q<sub>c</sub> ≈ {edge_R:.3f}",
+                   f"⟨R⟩(0…m·q<sub>c</sub>) = {self.mean_R:.4f}"
+                   + (f" ± {spread:.4f}" if n_real > 1 else "") + f" {'✓' if ok else '✗'} (target {target:.3f})<br>"
+                   f"R near m·q<sub>c</sub> ≈ {edge_R:.3f}"
+                   + (f" · {n_real} random structures, thickness error {self.v('thick_error'):g} %" if n_real > 1 else ""),
                    Q_LABEL, "Reflectivity <i>R</i>")
         panel.place_legend(a, "lower left" if log_scale else "upper right")
 
         # ---- X-ray R(q) ----
         a = panel.xray
         panel.draw_reflectivity(a, q_x, R_x, k_x, colors["xray"], log_scale, decades, self.v("xray_background"),
-                                measured_x, self.measured["xray"] and self.measured["xray"][0])
+                                measured_x, self.measured["xray"] and self.measured["xray"][0], band_x, curve_label)
         panel.add_vline(a, q_cx, colors["q_c"], DASH, f"{densest.name} q<sub>c</sub> ({q_cx:.4f} Å⁻¹)")
         style_plot(a, colors["axes"],
                    f"X-rays · λ = {wavelength:.4f} Å ({self.v('E_x'):.3f} keV)<br>"
                    f"{self.v('polarization')}-polarization · same structure, ε from the cards", Q_LABEL, "Reflectivity <i>R</i>")
         panel.place_legend(a, "upper right")
 
-        # ---- depth profiles of the same structure: always the graded (rough) profile ----
-        if interface.method == "factor":
-            potentials, thicknesses, _ = build_stack(self.materials, N, ambient, substrate, interface, graded=True)
-            epsilons, _, _ = build_stack(self.materials, N, ambient, substrate, interface, quantity="epsilon", graded=True)
+        # ---- depth profiles: the graded (rough) profile of the first structure (seed) ----
+        potentials, thicknesses, _ = build_stack(self.materials, N, ambient, substrate, interface, graded=True)
+        epsilons, _, _ = build_stack(self.materials, N, ambient, substrate, interface, quantity="epsilon", graded=True)
         self.lbl_slices.setText(self.slicing_summary(interface, d_max, q_highest))
         panel.draw_profile(panel.potential, potentials, thicknesses, self.v("z_pad"), colors["potential"])
         how = (f"{n_steps} slices" if interface.method == "slices" else

@@ -178,17 +178,22 @@ class PlotPanel(QtWidgets.QWidget):
 
     # ---- R(q) ----
     def draw_reflectivity(self, plot, q, R, k, color, log_scale, log_decades, background=0.0,
-                          measured=None, measured_name=""):
+                          measured=None, measured_name="", band=None, label="Parratt"):
         """
         R(q) curve, with the glancing angle of this beam (k) on the top axis.
         log_scale: the axis follows the curves, from the decade above max R down to the decade of min R,
                    but at most log_decades decades.
         background is added to the drawn curve only (Multifitting's 'Background').
         measured = (q[], R[]) of a measured curve, drawn as points (None = no file).
+        band = (low[], high[]): spread of several random structures, drawn as a shaded band (None = no band).
         """
         R = R + background
-        label = "Parratt" if background == 0 else f"Parratt + background {background:.3g}"
+        if background != 0:
+            label += f" + background {background:.3g}"
         shown = R if measured is None else np.concatenate((R, measured[1]))    # what the y axis must hold
+        if band is not None:
+            band = (band[0] + background, band[1] + background)
+            shown = np.concatenate((shown, band[1]))
         plot.setLogMode(x=False, y=log_scale)
         if log_scale:
             R_top = max(float(shown.max()), 1e-300)
@@ -201,6 +206,13 @@ class PlotPanel(QtWidgets.QWidget):
             y_range = (0.0, max(1.05, 1.05 * float(shown.max())))
         curve = plot.plot(q, R, pen=pen(color, 1.4), name=label)
         curve.setZValue(1)                                                       # the curve over the points
+        if band is not None:
+            floor = 10.0 ** (y_range[0] - 1) if log_scale else -np.inf
+            low = plot.plot(q, np.maximum(band[0], floor), pen=None)
+            high = plot.plot(q, np.maximum(band[1], floor), pen=None)
+            plot.addItem(pg.FillBetweenItem(low, high, brush=brush(color, 0.25)))
+            self.legends[plot].addItem(pg.PlotDataItem(pen=None, fillLevel=0, fillBrush=brush(color, 0.4)),
+                                       "16–84 % of the random structures")
         if measured is not None:
             q_m, R_m = measured
             keep = R_m > 0 if log_scale else np.isfinite(R_m)                   # log axis: no points ≤ 0
@@ -249,6 +261,16 @@ class PlotPanel(QtWidgets.QWidget):
         plot.setYRange(values.min() - 0.2 * span - 0.01, values.max() + 0.2 * span + 0.01, padding=0)
 
 
+def framed(widget, margin=3):
+    """The widget inside an outlined frame like the plot boxes (QFrame#PlotFrame)."""
+    frame = QtWidgets.QFrame()
+    frame.setObjectName("PlotFrame")
+    layout = QtWidgets.QVBoxLayout(frame)
+    layout.setContentsMargins(margin, margin, margin, margin)
+    layout.addWidget(widget)
+    return frame
+
+
 # ==============================================================================
 # Small plot of a material card
 # ==============================================================================
@@ -270,12 +292,12 @@ class MiniPlot(pg.PlotWidget):
     def draw(self, period, d, color, title):
         plot = self.getPlotItem()
         plot.clear()
-        self.setBackground(colors["card_plot"])
+        self.setBackground(colors["panel"])
         plot.plot(period, d, pen=pen(color, 1.4), symbol="o" if d.size <= 150 else None, symbolSize=4,
                   symbolPen=None, symbolBrush=brush(color))
         if np.any(d < 0):
             plot.addItem(pg.InfiniteLine(pos=0.0, angle=0, pen=pen(colors["warning"], 1.0, DASH), movable=False))
-        style_plot(plot, colors["card_plot"], title, "period  (1 = top)", "d (Å)",
+        style_plot(plot, colors["axes"], title, "period  (1 = top)", "d (Å)",
                    title_size="8pt", label_size="7pt", tick_size=6.5)
         low, high = min(float(d.min()), 0.0 if np.any(d < 0) else float(d.min())), float(d.max())
         span = high - low if high > low else max(abs(high), 1.0)
