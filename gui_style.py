@@ -64,6 +64,17 @@ QLabel#DropZone {
     color: #57606a;
     font-weight: bold;
 }
+QFrame#PlotFrame {
+    background-color: #ffffff;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+}
+QLabel#PlotTitle {
+    background-color: transparent;
+    border: none;
+    font-weight: bold;
+    padding: 3px 4px 1px 4px;
+}
 QLabel#Formula {
     color: #57606a;
     font-style: italic;
@@ -146,6 +157,17 @@ QLabel#DropZone {
     padding: 6px;
     color: #A8A8A8;
     font-weight: bold;
+}
+QFrame#PlotFrame {
+    background-color: #333333;
+    border: 1px solid #474747;
+    border-radius: 6px;
+}
+QLabel#PlotTitle {
+    background-color: transparent;
+    border: none;
+    font-weight: bold;
+    padding: 3px 4px 1px 4px;
 }
 QLabel#Formula {
     color: #A8A8A8;
@@ -246,7 +268,7 @@ THEMES = {
         "layers": ['#0052cc', '#c81e1e', '#1a7f37', '#8250df', '#bf8700', '#0a7ea4', '#cf222e'],
         "palette": None,                  # the normal palette of the system style
         # plots
-        "figure": '#ffffff', "axes": '#ffffff', "card_plot": '#ffffff',
+        "figure": '#ffffff', "panel": '#ffffff', "axes": '#ffffff', "card_plot": '#ffffff',
         "text": '#24292f', "edge": '#57606a', "grid": '#b0b7bf',
         "neutron": '#0052cc', "xray": '#8250df', "data": '#24292f',
         "q_c": '#e02424', "edge_line": '#1a7f37', "target": '#57606a',
@@ -264,7 +286,7 @@ THEMES = {
         },
         "disabled_text": '#7A7A7A',
         # plots
-        "figure": '#2C2C2C', "axes": '#262626', "card_plot": '#3A3A3A',
+        "figure": '#2C2C2C', "panel": '#333333', "axes": '#262626', "card_plot": '#3A3A3A',
         "text": '#E6E6E6', "edge": '#8A8A8A', "grid": '#555555',
         "neutron": '#BFC7FF', "xray": '#8E96D0', "data": '#D9D9D9',
         "q_c": '#A6A6A6', "edge_line": '#BFC7FF', "target": '#8A8A8A',

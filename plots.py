@@ -6,7 +6,9 @@ drag = move, mouse wheel = zoom, right-click = menu with "View All" and "Export�
 curves), the small "A" button in the corner = back to the full view.
 
     AngleAxis       top axis of an R(q) plot: ticks at round glancing angles θ (°) of that beam, q = 2k·sin θ
-    PlotPanel       the four plots of the main window: X-ray column R(q) and 1 − Re ε(z), neutron column R(q) and V(z)
+    PlotBox         one plot in an outlined frame (styled like the group boxes) with its title above it
+    PlotPanel       the four plot boxes of the main window: X-ray column R(q) and 1 − Re ε(z),
+                    neutron column R(q) and V(z)
                         draw_reflectivity()  R(q) on a log or linear axis + measured points
                         add_vline(), add_segment(), add_range()   marks with a legend line
                         draw_profile()       depth profile as steps
@@ -18,7 +20,7 @@ import numpy as np
 
 try:
     import pyqtgraph as pg
-    from pyqtgraph.Qt import QtGui
+    from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 except ImportError as error:                               # pyqtgraph is not part of PyQt
     raise ImportError("The plots need the pyqtgraph package:  pip install pyqtgraph") from error
 
@@ -57,7 +59,11 @@ def font(points):
 def style_plot(plot, background, title, bottom, left, title_size="9pt", label_size="9pt", tick_size=8.0):
     """Theme colors, title and axis labels of one plot (texts may contain HTML: <sub>, <sup>, <i>, <br>)."""
     plot.getViewBox().setBackgroundColor(background)
-    plot.setTitle(title, color=colors["text"], size=title_size, bold=True)
+    box_title = getattr(plot, "box_title", None)            # plot inside a PlotBox: the title is a Qt label above it
+    if isinstance(box_title, QtWidgets.QLabel):
+        box_title.setText(title)
+    else:
+        plot.setTitle(title, color=colors["text"], size=title_size, bold=True)
     for name, text in (("bottom", bottom), ("left", left)):
         plot.setLabel(name, text, color=colors["text"], **{"font-size": label_size})
     for name in ("bottom", "left", "top"):
@@ -106,15 +112,47 @@ class AngleAxis(pg.AxisItem):
 # ==============================================================================
 # The four plots of the main window
 # ==============================================================================
-class PlotPanel(pg.GraphicsLayoutWidget):
-    """Two columns: X-ray R(q) over 1 − Re ε(z), neutron R(q) over V(z)."""
+class PlotBox(QtWidgets.QFrame):
+    """
+    One plot in an outlined frame, styled like the group boxes (QFrame#PlotFrame in gui_style), with its
+    title as a Qt label above the plot: titles of several lines then never overlap the plot's top axis.
+    """
+
+    def __init__(self, top_axis=None):
+        super().__init__()
+        self.setObjectName("PlotFrame")
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(0)
+        self.title = QtWidgets.QLabel("")
+        self.title.setObjectName("PlotTitle")
+        flags = getattr(QtCore.Qt, "AlignmentFlag", QtCore.Qt)            # Qt6: scoped enums, Qt5: flat
+        self.title.setAlignment(getattr(flags, "AlignCenter", None) or QtCore.Qt.AlignCenter)
+        formats = getattr(QtCore.Qt, "TextFormat", QtCore.Qt)
+        self.title.setTextFormat(getattr(formats, "RichText", None) or QtCore.Qt.RichText)   # <sub>, <br>, <i>
+        self.title.setWordWrap(True)
+        layout.addWidget(self.title)
+        self.widget = pg.PlotWidget(axisItems={"top": top_axis} if top_axis else None)
+        layout.addWidget(self.widget, 1)
+        self.plot = self.widget.getPlotItem()
+        self.plot.box_title = self.title                    # style_plot() writes the title here
+
+    def apply_theme(self):
+        self.widget.setBackground(colors["panel"])
+
+
+class PlotPanel(QtWidgets.QWidget):
+    """Two columns of outlined plot boxes: X-ray R(q) over 1 − Re ε(z), neutron R(q) over V(z)."""
 
     def __init__(self):
         super().__init__()
-        self.xray = self.addPlot(row=0, col=0, axisItems={"top": AngleAxis()})        # X-ray column
-        self.epsilon = self.addPlot(row=1, col=0)
-        self.neutron = self.addPlot(row=0, col=1, axisItems={"top": AngleAxis()})     # neutron column
-        self.potential = self.addPlot(row=1, col=1)
+        grid = QtWidgets.QGridLayout(self)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(6)
+        self.boxes = [PlotBox(AngleAxis()), PlotBox(), PlotBox(AngleAxis()), PlotBox()]
+        for box, (row, col) in zip(self.boxes, ((0, 0), (1, 0), (0, 1), (1, 1))):
+            grid.addWidget(box, row, col)
+        self.xray, self.epsilon, self.neutron, self.potential = (box.plot for box in self.boxes)
         for plot in (self.xray, self.epsilon, self.neutron, self.potential):
             for name in ("bottom", "left", "top"):
                 plot.getAxis(name).enableAutoSIPrefix(False)    # no "(×0.001)": the numbers are shown as they are
@@ -129,7 +167,8 @@ class PlotPanel(pg.GraphicsLayoutWidget):
         self.apply_theme()
 
     def apply_theme(self):
-        self.setBackground(colors["figure"])
+        for box in self.boxes:
+            box.apply_theme()
 
     def clear_all(self):
         for plot in (self.neutron, self.xray, self.potential, self.epsilon):
