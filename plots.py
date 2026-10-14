@@ -5,7 +5,9 @@ pyqtgraph draws directly with Qt, so redrawing is fast (also during the optimiza
 drag = move, mouse wheel = zoom, right-click = menu with "View All" and "Export…" (PNG, SVG, CSV of the
 curves), the small "A" button in the corner = back to the full view.
 Under every plot a readout line shows the mouse position (x, y; and θ on the R(q) plots); a left click marks
-the calculated curve at that x and writes its exact value.
+the calculated curve at that x and writes its exact value. "Save data…" writes the calculated curves of that plot
+(full resolution, true values) to a CSV or text file — use it instead of pyqtgraph's own Export → CSV / HDF5,
+which exports what is drawn (only the visible, thinned-out points; log10 values on a log axis).
 
     AngleAxis       top axis of an R(q) plot: ticks at round glancing angles θ (°) of that beam, q = 2k·sin θ
     PlotBox         one plot in an outlined frame (styled like the group boxes): title above, readout below
@@ -143,7 +145,15 @@ class PlotBox(QtWidgets.QFrame):
         self.readout = QtWidgets.QLabel("Move the mouse over the plot; left-click marks the curve.")
         self.readout.setObjectName("Formula")
         self.readout.setTextFormat(getattr(formats, "RichText", None) or QtCore.Qt.RichText)
-        layout.addWidget(self.readout)
+        bottom = QtWidgets.QHBoxLayout()
+        bottom.setContentsMargins(0, 0, 0, 0)
+        bottom.addWidget(self.readout, 1)
+        self.save_button = QtWidgets.QPushButton("Save data…")
+        self.save_button.setToolTip("Write the calculated curves of this plot (all points, true values) to a .csv or .txt file")
+        self.save_button.clicked.connect(lambda *_: self.save_data())
+        bottom.addWidget(self.save_button)
+        layout.addLayout(bottom)
+        self.series = []                                    # (name, x[], y[]) of the curves drawn in this plot
         self.top_axis = top_axis                            # AngleAxis of an R(q) plot (for θ), else None
         self.names = ("x", "", "y", "")                     # x name, x unit, y name, y unit (set by the drawing)
         self.curve = None                                   # (x[], y[]) of the main curve, true values
@@ -162,8 +172,59 @@ class PlotBox(QtWidgets.QFrame):
         """The curve the readout and the click refer to (called by the drawing methods)."""
         self.curve = (np.asarray(x, dtype=float), np.asarray(y, dtype=float))
         self.names, self.steps, self.log_y = names, steps, log_y
+        self.series = []                                    # a new drawing: new curves to save
         self.mark_items = []                                # the redraw (plot.clear) removed the old mark
         self.clicked = ""
+
+    def add_series(self, name, x, y):
+        """Remember a drawn curve with its true values (for Save data…)."""
+        self.series.append((name, np.asarray(x, dtype=float), np.asarray(y, dtype=float)))
+
+    def save_data(self, path=None):
+        """
+        Write the curves of this plot to a file, one column pair per curve (x, y), all calculated points.
+        .csv: ';' between columns and a decimal comma (opens directly in Excel with a Russian locale);
+        .txt / .dat: tab between columns and a decimal point.
+        Depth profiles are written as one row per slice: z top, z bottom, value.
+        """
+        if not self.series:
+            self.readout.setText("Nothing to save yet.")
+            return
+        if path is None:
+            path, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self, "Save the curves of this plot", "",
+                "CSV for Excel, ';' and decimal comma (*.csv);;Text, tab and decimal point (*.txt *.dat)")
+            if not path:
+                return
+        excel = path.lower().endswith(".csv")
+        sep = ";" if excel else "\t"
+
+        def number(v):
+            text = f"{v:.8g}"
+            return text.replace(".", ",") if excel else text
+
+        if self.steps:                                      # profile: slices
+            name, edges, values = self.series[0]
+            header = [f"{self.names[0]} top ({self.names[1]})", f"{self.names[0]} bottom ({self.names[1]})",
+                      f"{self.names[2]} {self.names[3]}".strip()]
+            rows = [[number(a), number(b), number(v)] for a, b, v in zip(edges[:-1], edges[1:], values)]
+        else:                                               # curves: x, y column pair per curve
+            x_head = f"{self.names[0]} ({self.names[1]})"
+            header = []
+            for name, _, _ in self.series:
+                header += [f"{x_head} [{name}]", f"{self.names[2]} [{name}]"]
+            length = max(x.size for _, x, _ in self.series)
+            rows = []
+            for i in range(length):
+                row = []
+                for _, x, y in self.series:
+                    row += [number(x[i]), number(y[i])] if i < x.size else ["", ""]
+                rows.append(row)
+        with open(path, "w", encoding="utf-8-sig", newline="") as file:
+            file.write(sep.join(header) + "\n")
+            for row in rows:
+                file.write(sep.join(row) + "\n")
+        self.readout.setText(f"Saved {len(self.series)} curve(s), {len(rows)} rows → {path}")
 
     def describe(self, x, y):
         """'q = 0.0345 Å⁻¹ (θ = 0.789°), R = 0.912' for the point (x, y) in true values."""
@@ -292,6 +353,8 @@ class PlotPanel(QtWidgets.QWidget):
             y_range = (bottom_decade, np.log10(R_top * 1.5))                     # log axis: range in decades
         else:
             y_range = (0.0, max(1.05, 1.05 * float(shown.max())))
+        box = self.box_of[plot]
+        box.add_series(label, box.curve[0], box.curve[1])                     # true values, before the log clip
         curve = plot.plot(q, R, pen=pen(color, 1.4), name=label)
         curve.setZValue(1)                                                       # the curve over the points
         if band is not None:
@@ -299,11 +362,14 @@ class PlotPanel(QtWidgets.QWidget):
             low = plot.plot(q, np.maximum(band[0], floor), pen=None)
             high = plot.plot(q, np.maximum(band[1], floor), pen=None)
             plot.addItem(pg.FillBetweenItem(low, high, brush=brush(color, 0.25)))
+            box.add_series("16 % of the random structures", q, band[0])
+            box.add_series("84 % of the random structures", q, band[1])
             self.legends[plot].addItem(pg.PlotDataItem(pen=None, fillLevel=0, fillBrush=brush(color, 0.4)),
                                        "16–84 % of the random structures")
         if measured is not None:
             q_m, R_m = measured
             keep = R_m > 0 if log_scale else np.isfinite(R_m)                   # log axis: no points ≤ 0
+            box.add_series(f"measured: {measured_name}", q_m, R_m)
             plot.plot(q_m[keep], R_m[keep], pen=None, symbol="o", symbolSize=3, symbolPen=None,
                       symbolBrush=brush(colors["data"], 0.75), name=f"measured: {measured_name}")
         plot.setXRange(0.0, q[-1], padding=0)
@@ -342,6 +408,7 @@ class PlotPanel(QtWidgets.QWidget):
         """Depth profile of one quantity: each slice drawn as a step from its top edge to its bottom edge."""
         edges = np.concatenate(([-z_pad], np.cumsum(thicknesses[:-1]), [thicknesses.sum() + z_pad]))
         self.box_of[plot].set_curve(edges, values, ("z", "Å") + tuple(value_name), steps=True)
+        self.box_of[plot].add_series(value_name[0], edges, values)
         plot.setLogMode(x=False, y=False)
         plot.plot(edges, values, stepMode="center", pen=pen(color, 1.2), fillLevel=0.0,
                   fillBrush=brush(color, 0.15))
