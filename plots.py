@@ -4,9 +4,11 @@ plots.py — the plots of the program, drawn with pyqtgraph
 pyqtgraph draws directly with Qt, so redrawing is fast (also during the optimization). In every plot:
 drag = move, mouse wheel = zoom, right-click = menu with "View All" and "Export…" (PNG, SVG, CSV of the
 curves), the small "A" button in the corner = back to the full view.
+Under every plot a readout line shows the mouse position (x, y; and θ on the R(q) plots); a left click marks
+the calculated curve at that x and writes its exact value.
 
     AngleAxis       top axis of an R(q) plot: ticks at round glancing angles θ (°) of that beam, q = 2k·sin θ
-    PlotBox         one plot in an outlined frame (styled like the group boxes) with its title above it
+    PlotBox         one plot in an outlined frame (styled like the group boxes): title above, readout below
     PlotPanel       the four plot boxes of the main window: X-ray column R(q) and 1 − Re ε(z),
                     neutron column R(q) and V(z)
                         draw_reflectivity()  R(q) on a log or linear axis + measured points
@@ -137,8 +139,92 @@ class PlotBox(QtWidgets.QFrame):
         self.plot = self.widget.getPlotItem()
         self.plot.box_title = self.title                    # style_plot() writes the title here
 
+        # ---- readout of the mouse position and of the clicked curve point ----
+        self.readout = QtWidgets.QLabel("Move the mouse over the plot; left-click marks the curve.")
+        self.readout.setObjectName("Formula")
+        self.readout.setTextFormat(getattr(formats, "RichText", None) or QtCore.Qt.RichText)
+        layout.addWidget(self.readout)
+        self.top_axis = top_axis                            # AngleAxis of an R(q) plot (for θ), else None
+        self.names = ("x", "", "y", "")                     # x name, x unit, y name, y unit (set by the drawing)
+        self.curve = None                                   # (x[], y[]) of the main curve, true values
+        self.steps = False                                  # True: a depth profile (y constant within a slice)
+        self.log_y = False                                  # True: the view's y is log10 of the value
+        self.clicked = ""                                   # text of the last clicked point
+        self.mark_items = []
+        scene = self.widget.scene()
+        scene.sigMouseMoved.connect(self.on_mouse_moved)
+        scene.sigMouseClicked.connect(self.on_mouse_clicked)
+
     def apply_theme(self):
         self.widget.setBackground(colors["panel"])
+
+    def set_curve(self, x, y, names, steps=False, log_y=False):
+        """The curve the readout and the click refer to (called by the drawing methods)."""
+        self.curve = (np.asarray(x, dtype=float), np.asarray(y, dtype=float))
+        self.names, self.steps, self.log_y = names, steps, log_y
+        self.mark_items = []                                # the redraw (plot.clear) removed the old mark
+        self.clicked = ""
+
+    def describe(self, x, y):
+        """'q = 0.0345 Å⁻¹ (θ = 0.789°), R = 0.912' for the point (x, y) in true values."""
+        x_name, x_unit, y_name, y_unit = self.names
+        text = f"{x_name} = {x:.5g} {x_unit}"
+        if self.top_axis is not None:
+            text += f" (θ = {float(glancing_angle(max(x, 0.0), self.top_axis.k)):.4g}°)"
+        return text + f",  {y_name} = {y:.4g} {y_unit}".rstrip()
+
+    def value_at(self, x):
+        """Calculated curve at x: the nearest calculated point (R(q)), or the slice containing x (profiles)."""
+        xs, ys = self.curve
+        if self.steps:                                      # xs = slice edges, ys = one value per slice
+            i = int(np.clip(np.searchsorted(xs, x) - 1, 0, ys.size - 1))
+            return x, ys[i]
+        i = int(np.argmin(np.abs(xs - x)))
+        return xs[i], ys[i]
+
+    def view_point(self, scene_pos):
+        """(x, y in view coordinates) of a mouse position inside the plot area, else None."""
+        box = self.plot.vb
+        if not box.sceneBoundingRect().contains(scene_pos):
+            return None
+        point = box.mapSceneToView(scene_pos)
+        return point.x(), point.y()
+
+    def on_mouse_moved(self, scene_pos):
+        point = self.view_point(scene_pos)
+        if point is None or self.curve is None:
+            return
+        x, y = point
+        self.show_readout(x, 10.0 ** y if self.log_y else y)
+
+    def show_readout(self, x, y):
+        text = "cursor: " + self.describe(x, y)
+        if self.clicked:
+            text += "   ·   <b>marked:</b> " + self.clicked
+        self.readout.setText(text)
+
+    def on_mouse_clicked(self, event):
+        left = getattr(getattr(QtCore.Qt, "MouseButton", QtCore.Qt), "LeftButton", None) or QtCore.Qt.LeftButton
+        if event.button() != left or self.curve is None:
+            return
+        point = self.view_point(event.scenePos())
+        if point is not None:
+            self.mark(point[0])
+
+    def mark(self, x):
+        """Mark the calculated curve at x with a dot and its value, also in the readout line."""
+        x, y = self.value_at(x)
+        for item in self.mark_items:                        # one mark at a time
+            self.plot.removeItem(item)
+        dot = pg.PlotDataItem([x], [y], pen=None, symbol="o", symbolSize=8, symbolPen=pen(colors["text"], 1.2),
+                              symbolBrush=None)
+        self.plot.addItem(dot)                              # PlotDataItem: the plot applies its log axis itself
+        self.clicked = self.describe(x, y)
+        label = pg.TextItem(self.clicked, color=colors["text"], anchor=(0, 1), fill=brush(colors["axes"], 0.85))
+        label.setPos(x, np.log10(y) if self.log_y and y > 0 else y)   # TextItem: view coordinates
+        self.plot.addItem(label)
+        self.mark_items = [dot, label]
+        self.readout.setText("<b>marked:</b> " + self.clicked)
 
 
 class PlotPanel(QtWidgets.QWidget):
@@ -153,6 +239,7 @@ class PlotPanel(QtWidgets.QWidget):
         for box, (row, col) in zip(self.boxes, ((0, 0), (1, 0), (0, 1), (1, 1))):
             grid.addWidget(box, row, col)
         self.xray, self.epsilon, self.neutron, self.potential = (box.plot for box in self.boxes)
+        self.box_of = {box.plot: box for box in self.boxes}
         for plot in (self.xray, self.epsilon, self.neutron, self.potential):
             for name in ("bottom", "left", "top"):
                 plot.getAxis(name).enableAutoSIPrefix(False)    # no "(×0.001)": the numbers are shown as they are
@@ -188,6 +275,7 @@ class PlotPanel(QtWidgets.QWidget):
         band = (low[], high[]): spread of several random structures, drawn as a shaded band (None = no band).
         """
         R = R + background
+        self.box_of[plot].set_curve(q, R, ("q", "Å⁻¹", "R", ""), log_y=log_scale)   # readout / click: true values
         if background != 0:
             label += f" + background {background:.3g}"
         shown = R if measured is None else np.concatenate((R, measured[1]))    # what the y axis must hold
@@ -250,9 +338,10 @@ class PlotPanel(QtWidgets.QWidget):
         self.legends[plot].addItem(pg.PlotDataItem(pen=None, fillLevel=0, fillBrush=brush(color, 0.35)), label)
 
     # ---- depth profile ----
-    def draw_profile(self, plot, values, thicknesses, z_pad, color):
+    def draw_profile(self, plot, values, thicknesses, z_pad, color, value_name=("value", "")):
         """Depth profile of one quantity: each slice drawn as a step from its top edge to its bottom edge."""
         edges = np.concatenate(([-z_pad], np.cumsum(thicknesses[:-1]), [thicknesses.sum() + z_pad]))
+        self.box_of[plot].set_curve(edges, values, ("z", "Å") + tuple(value_name), steps=True)
         plot.setLogMode(x=False, y=False)
         plot.plot(edges, values, stepMode="center", pen=pen(color, 1.2), fillLevel=0.0,
                   fillBrush=brush(color, 0.15))

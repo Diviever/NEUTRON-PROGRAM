@@ -624,8 +624,9 @@ class MultilayerApp(QMainWindow):
         right_layout.setContentsMargins(0, 0, 0, 0)
         self.plots = PlotPanel()                             # X-ray column: R(q), ε(z) · neutron column: R(q), V(z)
         right_layout.addWidget(self.plots)
-        hint = QLabel("Plots: drag = move · wheel = zoom (over an axis: that axis only) · "
-                      "right-click = View All / Export (PNG, SVG, CSV) · 'A' corner button = full view again")
+        hint = QLabel("Plots: mouse position under each plot · left-click = mark the curve value · drag = move · "
+                      "wheel = zoom (over an axis: that axis only) · right-click = View All / Export (PNG, SVG, CSV) · "
+                      "'A' corner button = full view again")
         hint.setObjectName("Formula")
         hint.setWordWrap(True)
         right_layout.addWidget(hint)
@@ -1366,12 +1367,13 @@ class MultilayerApp(QMainWindow):
         potentials, thicknesses, _ = build_stack(self.materials, N, ambient, substrate, interface, graded=True)
         epsilons, _, _ = build_stack(self.materials, N, ambient, substrate, interface, quantity="epsilon", graded=True)
         self.lbl_slices.setText(self.slicing_summary(interface, d_max, q_highest))
-        panel.draw_profile(panel.potential, potentials, thicknesses, self.v("z_pad"), colors["potential"])
+        panel.draw_profile(panel.potential, potentials, thicknesses, self.v("z_pad"), colors["potential"], ("V", "µeV"))
         how = (f"{n_steps} slices" if interface.method == "slices" else
                f"{n_steps} sharp layers × roughness factors · graded profile shown")
         style_plot(panel.potential, colors["axes"], f"Neutron potential <i>V</i>(z)<br>{how}",
                    Z_LABEL, "Potential <i>V</i> (µeV)")
-        panel.draw_profile(panel.epsilon, (1.0 - epsilons.real) * 1e5, thicknesses, self.v("z_pad"), colors["epsilon"])
+        panel.draw_profile(panel.epsilon, (1.0 - epsilons.real) * 1e5, thicknesses, self.v("z_pad"), colors["epsilon"],
+                           ("(1 − Re ε)·10⁵", ""))
         style_plot(panel.epsilon, colors["axes"], "X-ray permittivity: 1 − Re ε(z)", Z_LABEL, "(1 − Re ε) × 10<sup>5</sup>")
         self.calc_seconds = time.time() - started
 
