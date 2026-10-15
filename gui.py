@@ -46,7 +46,7 @@ from calculation import (Material, Interface, build_stack, neutron_reflectivity,
                          critical_q, xray_critical_q, q_grid, mean_reflectivity,
                          energy_from_k, k_from_energy, glancing_angle, q_from_angle, H_OVER_M,
                          xray_wavelength, xray_energy)
-from optimizer import M_REFERENCE, reference_for_m, hayter_mook_start, GradientDescent, optimize
+from optimizer import M_REFERENCE, reference_for_m, hayter_mook_start, GradientDescent, ArrayDescent, optimize
 from gui_style import THEMES, colors
 from plots import PlotPanel, MiniPlot, framed, style_plot, DASH, DOT
 from structure_file import (LIBRARY_DIR, load_library, sheet_names, read_layers, periodic_materials,
@@ -516,9 +516,13 @@ PARAMETERS = [
 
     ("N_start",        "N start",                    50,             2,       20000,    1,       0,   "search",    "First N tried (filled from the reference table)"),
     ("N_max",          "N max",                      150,            2,       20000,    1,       0,   "search",    "Largest N allowed (filled from the reference table)"),
+    ("opt_params",     "Optimize",                   ("thickness of every layer", "polynomial coefficients"), None, None, None, None, "search",
+     "thickness of every layer: every element of each material's thickness array (user-determined mode) moves on its own, "
+     "with the exact gradient from one extra pass of the recursion (roughness by the factor method). "
+     "polynomial coefficients: few parameters d(t) = c0 + c1·t + …, gradient by finite differences"),
     ("growth",         "N growth ×",                 1.15,           1.01,    3.0,      0.05,    2,   "search",    "N is multiplied by this when a stage ends without reaching the target"),
     ("max_iter",       "Max iterations / N",         150,            5,       5000,     10,      0,   "search",    "Gradient-descent iterations allowed for one N"),
-    ("step",           "Adam step (Å)",              2.0,            0.01,    50.0,     0.5,     2,   "search",    "How far every coefficient moves in one iteration (at the start)"),
+    ("step",           "Adam step (Å)",              2.0,            0.01,    50.0,     0.5,     2,   "search",    "How far every parameter (layer thickness or coefficient) moves in one iteration (at the start)"),
     ("d_min",          "Min layer d (Å)",            10.0,           0.0,     100.0,    1.0,     1,   "search",    "Layers thinner than this are penalized"),
 
     ("penalty_weight", "Thin-layer penalty weight",  10.0,           0.0,     1000.0,   1.0,     2,   "advanced",  "Weight of the d < d_min penalty in the loss"),
@@ -1388,12 +1392,13 @@ class MultilayerApp(QMainWindow):
             return
         q_c, q_top, _ = self.target_edge()
         N_start = self.v("N_start")
-        gd = GradientDescent(self.materials, N_start,
-                             self.ambient(), self.substrate(), self.interface(),
-                             self.q_values(q_top), q_top,
-                             step=self.v("step"), step_decay=self.v("step_decay"),
-                             d_min=self.v("d_min"), penalty_weight=self.v("penalty_weight"),
-                             h=self.v("h"), beta1=self.v("beta1"), beta2=self.v("beta2"))
+        method = ArrayDescent if self.v("opt_params").startswith("thickness") else GradientDescent
+        gd = method(self.materials, N_start,
+                    self.ambient(), self.substrate(), self.interface(),
+                    self.q_values(q_top), q_top,
+                    step=self.v("step"), step_decay=self.v("step_decay"),
+                    d_min=self.v("d_min"), penalty_weight=self.v("penalty_weight"),
+                    h=self.v("h"), beta1=self.v("beta1"), beta2=self.v("beta2"))
         self.running = True
         self.set_inputs_enabled(False)
         self.opt_started = time.time()
@@ -1411,7 +1416,7 @@ class MultilayerApp(QMainWindow):
                 "stopped": "■ Stopped — best result of the current N kept"}[status]
         self.lbl_status.setText(f"{head}: N = {gd.N} ({gd.N * len(self.materials)} layers), "
                                 f"⟨R⟩ = {self.mean_R:.4f} (target {self.v('target'):.3f}), "
-                                f"{time.time() - self.opt_started:.0f} s.")
+                                f"{time.time() - self.opt_started:.0f} s, optimized: {gd.name}.")
 
     def on_optimizer_step(self, N, iteration, mean_R, best_R):
         """Called by optimize() every iteration. Returns False when Stop was pressed."""

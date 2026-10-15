@@ -3,7 +3,9 @@ optimizer.py — supermirror optimizer (no GUI code)
 
     reference_for_m(m)        typical layer count and reflectivity of real supermirrors
     hayter_mook_start(...)    optional start profile for the materials
-    GradientDescent           changes material.poly IN PLACE to raise ⟨R⟩ on 0 … m·q_c
+    GradientDescent           changes material.poly IN PLACE to raise ⟨R⟩ on 0 … m·q_c (few parameters)
+    ArrayDescent              changes material.user IN PLACE: the thickness of every single layer is a parameter;
+                              exact gradient of ⟨R⟩ for all of them from one extra pass (calculation.parratt)
     optimize(...)             the full search: gradient descent at N, then larger N, until ⟨R⟩ ≥ target
 
 Every structure is evaluated with calculation.build_stack() and calculation.neutron_reflectivity().
@@ -12,7 +14,7 @@ import math
 
 import numpy as np
 
-from calculation import build_stack, neutron_reflectivity, mean_reflectivity, critical_q
+from calculation import Interface, build_stack, neutron_reflectivity, mean_reflectivity, critical_q
 
 
 # ==============================================================================
@@ -95,6 +97,21 @@ class GradientDescent:
         self.mean_R = 0.0                     # ⟨R⟩ of the last evaluated structure
         self.set_N(N)
 
+    name = "polynomial coefficients"
+
+    def prepare(self):
+        """Materials in linear or user mode become a polynomial (straight line / least-squares fit)."""
+        for mat in self.materials:
+            if mat.mode != "poly":
+                mat.switch_to_poly()
+
+    def snapshot(self):
+        return [mat.poly.copy() for mat in self.materials]
+
+    def restore(self, saved):
+        for mat, poly in zip(self.materials, saved):
+            mat.poly = poly
+
     def set_N(self, N):
         """New number of repeats; the Adam memory starts again from zero."""
         self.N = N
@@ -144,31 +161,129 @@ class GradientDescent:
 
 
 # ==============================================================================
+# Gradient descent (Adam) on the thickness of every layer (user-determined arrays)
+# ==============================================================================
+class ArrayDescent:
+    """
+    Minimizes   loss = 1 − ⟨R⟩ + penalty_weight · (penalty for layers thinner than d_min)
+    over every element of material.user — the thickness of each material in each period (top period first).
+
+    The gradient of ⟨R⟩ with respect to all N·(number of materials) thicknesses comes from one extra pass
+    through the Parratt recursion (neutron_reflectivity(..., gradient=True)), so one iteration costs about two
+    reflectivity calculations however many layers there are. The polynomial route needs one calculation per
+    coefficient instead, but has far fewer parameters; here every layer can move on its own.
+
+    The roughness is taken by the "factor" method (sharp layers × roughness factors): the gradient is exact
+    for it. Thicknesses never go below d_floor, so no layer disappears from the stack during the search.
+    Thickness errors (Interface.thickness_error) are included: the real layer is ideal × (1 + e).
+    """
+    name = "thickness of every layer"
+
+    def __init__(self, materials, N, ambient, substrate, interface, q, q_top,
+                 step, step_decay, d_min, penalty_weight, beta1, beta2, d_floor=1.0, **unused):
+        self.materials = materials
+        self.ambient, self.substrate = ambient, substrate
+        self.interface = Interface(method="factor", slice_thickness=interface.slice_thickness, chaos=interface.chaos,
+                                   seed=interface.seed, thickness_error=interface.thickness_error,
+                                   error_shape=interface.error_shape)
+        self.q, self.q_top = q, q_top
+        self.inside = q <= q_top                             # the q values of ⟨R⟩
+        self.step, self.step_decay = step, step_decay
+        self.d_min, self.penalty_weight = d_min, penalty_weight
+        self.beta1, self.beta2 = beta1, beta2
+        self.d_floor = d_floor                               # Å, smallest thickness allowed
+        self.mean_R = 0.0
+        self.N = N
+
+    def prepare(self):
+        """Nothing to convert: set_N() puts every material into user mode with N values."""
+
+    def snapshot(self):
+        return [mat.user.copy() for mat in self.materials]
+
+    def restore(self, saved):
+        for mat, user in zip(self.materials, saved):
+            mat.user = user
+
+    def set_N(self, N):
+        """N periods: every material gets its thickness array for N periods (a user array of another length,
+        a linear or polynomial law are sampled / interpolated); the Adam memory starts again from zero."""
+        for mat in self.materials:
+            values = mat.thicknesses(N)
+            mat.user = np.maximum(values, self.d_floor)
+            mat.mode = "user"
+        self.N = N
+        self.iteration = 0
+        self.avg_grad = [np.zeros(N) for _ in self.materials]
+        self.avg_grad_sq = [np.zeros(N) for _ in self.materials]
+
+    def loss_and_gradient(self):
+        """Loss of the current arrays and its gradient for every element (list: one array of N per material)."""
+        potentials, thicknesses, roughness = build_stack(self.materials, self.N, self.ambient, self.substrate,
+                                                         self.interface)
+        R, dR = neutron_reflectivity(potentials, thicknesses, self.q, roughness, gradient=True)
+        self.mean_R = mean_reflectivity(R, self.q, self.q_top)
+        d_mean_R = dR[:, self.inside].mean(axis=1)           # d⟨R⟩/d(real thickness), layers top first
+        d_mean_R = d_mean_R * self.interface.thickness_factors(d_mean_R.size)   # real = ideal × (1 + e)
+        per_material = d_mean_R.reshape(self.N, len(self.materials))           # period, material
+
+        loss = 1.0 - self.mean_R
+        grads = []
+        for m, mat in enumerate(self.materials):
+            grad = -per_material[:, m]
+            if self.d_min > 0:
+                short = np.clip(self.d_min - mat.user, 0.0, None)
+                loss += self.penalty_weight * np.mean(short**2) / self.d_min**2
+                grad = grad - self.penalty_weight * 2.0 * short / (self.N * self.d_min**2)
+            grads.append(grad)
+        return loss, grads
+
+    def loss(self):
+        return self.loss_and_gradient()[0]
+
+    def make_step(self, loss_now=None):
+        """One Adam step on all thicknesses."""
+        mean_R = self.mean_R
+        _, grads = self.loss_and_gradient()
+        self.mean_R = mean_R
+        self.iteration += 1
+        step = self.step / (1.0 + self.iteration / self.step_decay)
+        b1, b2 = self.beta1, self.beta2
+        for mat, grad, avg, avg_sq in zip(self.materials, grads, self.avg_grad, self.avg_grad_sq):
+            avg[:] = b1 * avg + (1 - b1) * grad
+            avg_sq[:] = b2 * avg_sq + (1 - b2) * grad**2
+            avg_hat = avg / (1 - b1**self.iteration)
+            avg_sq_hat = avg_sq / (1 - b2**self.iteration)
+            mat.user = np.maximum(mat.user - step * avg_hat / (np.sqrt(avg_sq_hat) + 1e-12), self.d_floor)
+
+
+# ==============================================================================
 # The full search
 # ==============================================================================
 def optimize(gd, target, N_start, N_max, growth, max_iter, patience, min_gain, on_step):
     """
-    0. Materials in linear or user mode are switched to poly mode (straight line / least-squares fit).
+    gd: GradientDescent (polynomial coefficients) or ArrayDescent (every layer thickness).
+    0. gd.prepare(): GradientDescent turns linear / user thicknesses into polynomials; ArrayDescent
+       turns every material into a thickness array of N values (in set_N).
     1. Gradient descent at the current N until ⟨R⟩ ≥ target (done), or until ⟨R⟩ has not
        improved by more than min_gain for `patience` iterations, or max_iter iterations are used.
-    2. Otherwise keep the best coefficients of this N, increase N (× growth) and go to 1.
+    2. Otherwise keep the best parameters of this N, increase N (× growth) and go to 1
+       (arrays are interpolated to the new N).
 
     on_step(N, iteration, mean_R, best_R) is called every iteration (GUI refresh);
     returning False stops the search.
     Returns "success", "n_max" or "stopped". The result is left in the materials and in gd.N.
     """
-    for mat in gd.materials:
-        if mat.mode != "poly":                  # linear and user thicknesses become a polynomial to optimize
-            mat.switch_to_poly()
+    gd.prepare()
     gd.set_N(N_start)
 
     while True:
-        best_R, best_poly, no_gain = -1.0, None, 0
+        best_R, best, no_gain = -1.0, None, 0
         status = "next N"
         for iteration in range(1, max_iter + 1):
             loss_now = gd.loss()
             if gd.mean_R > best_R + min_gain:
-                best_R, best_poly, no_gain = gd.mean_R, [mat.poly.copy() for mat in gd.materials], 0
+                best_R, best, no_gain = gd.mean_R, gd.snapshot(), 0
             else:
                 no_gain += 1
 
@@ -181,8 +296,7 @@ def optimize(gd, target, N_start, N_max, growth, max_iter, patience, min_gain, o
                 break
             gd.make_step(loss_now)
 
-        for mat, poly in zip(gd.materials, best_poly):           # keep the best coefficients of this N
-            mat.poly = poly
+        gd.restore(best)                                         # keep the best parameters of this N
         if status == "stopped":
             return "stopped"
 

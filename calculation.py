@@ -4,7 +4,7 @@ calculation.py — physics of the multilayer mirror (no GUI code)
     Material                 one material of the repeating unit: name, potential, ε, thickness law,
                              roughness σ and profile (erf / lin / exp mix) of its upper boundary
     step_fraction(), reach() the shape of one rough boundary: weighted mix of erf, linear and exponential steps
-    profile_transform(), roughness_factors()   the same shape in q space: Fourier transform of the step's
+    interlayer_factor(), roughness_factors()   the same shape in q space: Fourier transform of the step's
                              derivative, and the factors it gives a boundary's reflection and transmission
     Interface                the non-ideal parts of the stack: how roughness is calculated ("factor" or
                              "slices"), slicing, chaos of σ, random thickness errors of the layers
@@ -12,6 +12,7 @@ calculation.py — physics of the multilayer mirror (no GUI code)
                                          -> values[], thicknesses[], roughness
                                          (values = neutron potentials V or X-ray permittivities ε of the same structure)
     neutron_reflectivity()   METHOD 2.1: potentials[], thicknesses[], q[], roughness          ->  R(q) for neutrons
+                             (gradient=True: also dR/d(thickness) of every layer, for the optimizer)
     xray_reflectivity()      METHOD 2.2: permittivities[], thicknesses[], q[], λ, roughness   ->  R(q) for X-rays
 
 Two ways to include the roughness (Interface.method):
@@ -402,7 +403,7 @@ def build_stack(materials, N, ambient, substrate, interface, quantity="potential
 # ==============================================================================
 # The Parratt recursion (used by METHOD 2.1 and 2.2)
 # ==============================================================================
-def parratt(values, thicknesses, kz_of, fresnel, roughness=None):
+def parratt(values, thicknesses, kz_of, fresnel, roughness=None, gradient=False):
     """
     Specular reflectivity |r|² of the stack, starting inside the substrate (no reflected wave there) and
     working up to the ambient medium. At boundary j (medium j above, j+1 below):
@@ -418,6 +419,13 @@ def parratt(values, thicknesses, kz_of, fresnel, roughness=None):
 
     For a sharp stack kz is computed once per distinct medium (there are only a few) and the roughness
     factors once per distinct (medium above, medium below, σ, profile).
+
+    gradient=True also returns dR/dd for the thickness d of every layer (rows: layers top first, i.e.
+    thicknesses[1:-1]; columns: q), in one extra pass from the top down (chain rule through the recursion):
+        X_j = f_j(Y_j),  Y_j = X_j+1·p_j,  f_j'(Y) = t·t' / (1 + r·Y)²,  ∂Y_j/∂d_j+1 = 2i·kz_j+1·Y_j
+        ∂X_0/∂d_j+1 = G_j · f_j'(Y_j) · 2i·kz_j+1·Y_j,   G_0 = 1,  G_j+1 = G_j · f_j'(Y_j) · p_j
+        dR/dd = 2·Re(conj(X_0) · ∂X_0/∂d)
+    The cost is about that of a second reflectivity calculation, whatever the number of layers.
     """
     kz_cache, factor_cache = {}, {}
 
@@ -430,6 +438,7 @@ def parratt(values, thicknesses, kz_of, fresnel, roughness=None):
 
     X = 0.0                                                 # reflection amplitude below the current boundary
     kz_lower, v_lower = kz(values[-1]), values[-1]
+    saved = {}                                              # gradient: per boundary j (Y, f', p, kz below)
     for j in range(len(values) - 2, -1, -1):
         v_upper = values[j]
         kz_upper = kz(v_upper)
@@ -442,33 +451,47 @@ def parratt(values, thicknesses, kz_of, fresnel, roughness=None):
             W, T = factor_cache[key]
             r, tt = r0 * W, (1.0 - r0 * r0) * T
         if j + 1 < len(values) - 1:                         # a layer below this boundary (not the substrate)
-            Xp = X * np.exp(2j * kz_lower * thicknesses[j + 1])
+            p = np.exp(2j * kz_lower * thicknesses[j + 1])
+            Xp = X * p
+            if gradient:
+                saved[j] = (Xp, tt / (1.0 + r * Xp) ** 2, p, kz_lower)
             X = (r + (tt + r * r) * Xp) / (1.0 + r * Xp)
         else:
             X = r
         kz_lower, v_lower = kz_upper, v_upper
     R = np.abs(X) ** 2
+    if gradient:
+        dR = np.zeros((len(values) - 2, np.size(X)))
+        G = np.ones_like(X)                                 # ∂X_0/∂X_j, from the top down
+        for j in range(len(values) - 2):
+            Y, f_prime, p, kz_layer = saved[j]
+            dX0 = G * f_prime * 2j * kz_layer * Y           # ∂X_0/∂d of layer j+1
+            dR[j] = 2.0 * np.real(np.conj(X) * dX0)
+            G = G * f_prime * p
     if roughness is not None:
         # the factors are an approximation: at narrow resonances below a critical edge they can overshoot
         # the physical limit R = 1 by about 1–2 % (σ ≤ 0.1 of the layer thickness); R never exceeds 1
+        if gradient:
+            dR[:, R > 1.0] = 0.0                            # where R is held at 1, thickness changes nothing
         R = np.minimum(R, 1.0)
-    return R
+    return (R, dR) if gradient else R
 
 
 # ==============================================================================
 # METHOD 2.1: the neutron reflectivity
 # ==============================================================================
-def neutron_reflectivity(potentials, thicknesses, q, roughness=None):
+def neutron_reflectivity(potentials, thicknesses, q, roughness=None, gradient=False):
     """
     Specular neutron reflectivity R(q) of the stack (Parratt recursion).
     kz² = (q/2)² − KZ2_PER_UEV·V,   r = (kz_upper − kz_lower) / (kz_upper + kz_lower).
     roughness: the third result of build_stack (None for a graded stack).
+    gradient=True: returns (R, dR/dd) with dR/dd[layer, q] for every layer, top first (see parratt).
     """
     q = np.asarray(q, dtype=float)
     return parratt(potentials, thicknesses,
                    kz_of=lambda V: np.sqrt((q / 2.0) ** 2 - KZ2_PER_UEV * V + 0j),
                    fresnel=lambda ku, kl, vu, vl: (ku - kl) / (ku + kl),
-                   roughness=roughness)
+                   roughness=roughness, gradient=gradient)
 
 
 # ==============================================================================
