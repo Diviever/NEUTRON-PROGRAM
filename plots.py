@@ -5,7 +5,7 @@ pyqtgraph draws directly with Qt, so redrawing is fast (also during the optimiza
 drag = move, mouse wheel = zoom, right-click = menu with "View All" and "Export…" (PNG, SVG, CSV of the
 curves), the small "A" button in the corner = back to the full view.
 Under every plot a readout line shows the mouse position (x, y; and θ on the R(q) plots); a left click marks
-the calculated curve at that x and writes its exact value. "Save data…" writes the calculated curves of that plot
+the calculated curve at that x and writes its exact value on the line below. "Save data…" writes the calculated curves of that plot
 (full resolution, true values) to a CSV or text file — use it instead of pyqtgraph's own Export → CSV / HDF5,
 which exports what is drawn (only the visible, thinned-out points; log10 values on a log axis).
 
@@ -142,12 +142,22 @@ class PlotBox(QtWidgets.QFrame):
         self.plot.box_title = self.title                    # style_plot() writes the title here
 
         # ---- readout of the mouse position and of the clicked curve point ----
-        self.readout = QtWidgets.QLabel("Move the mouse over the plot; left-click marks the curve.")
-        self.readout.setObjectName("Formula")
-        self.readout.setTextFormat(getattr(formats, "RichText", None) or QtCore.Qt.RichText)
+        # two lines: the cursor position, and below it the marked point. Their width is "ignored" by the layout:
+        # a long text is cut at the box edge instead of widening the plot box.
+        policies = getattr(QtWidgets.QSizePolicy, "Policy", QtWidgets.QSizePolicy)
+        lines = QtWidgets.QVBoxLayout()
+        lines.setContentsMargins(0, 0, 0, 0)
+        lines.setSpacing(0)
+        self.readout = QtWidgets.QLabel("cursor: move the mouse over the plot")
+        self.marked = QtWidgets.QLabel("marked: left-click the plot")
+        for label in (self.readout, self.marked):
+            label.setObjectName("Formula")
+            label.setTextFormat(getattr(formats, "RichText", None) or QtCore.Qt.RichText)
+            label.setSizePolicy(policies.Ignored, policies.Preferred)
+            lines.addWidget(label)
         bottom = QtWidgets.QHBoxLayout()
         bottom.setContentsMargins(0, 0, 0, 0)
-        bottom.addWidget(self.readout, 1)
+        bottom.addLayout(lines, 1)
         self.save_button = QtWidgets.QPushButton("Save data…")
         self.save_button.setToolTip("Write the calculated curves of this plot (all points, true values) to a .csv or .txt file")
         self.save_button.clicked.connect(lambda *_: self.save_data())
@@ -175,6 +185,7 @@ class PlotBox(QtWidgets.QFrame):
         self.series = []                                    # a new drawing: new curves to save
         self.mark_items = []                                # the redraw (plot.clear) removed the old mark
         self.clicked = ""
+        self.marked.setText("marked: left-click the plot")
 
     def add_series(self, name, x, y):
         """Remember a drawn curve with its true values (for Save data…)."""
@@ -259,10 +270,7 @@ class PlotBox(QtWidgets.QFrame):
         self.show_readout(x, 10.0 ** y if self.log_y else y)
 
     def show_readout(self, x, y):
-        text = "cursor: " + self.describe(x, y)
-        if self.clicked:
-            text += "   ·   <b>marked:</b> " + self.clicked
-        self.readout.setText(text)
+        self.readout.setText("cursor: " + self.describe(x, y))
 
     def on_mouse_clicked(self, event):
         left = getattr(getattr(QtCore.Qt, "MouseButton", QtCore.Qt), "LeftButton", None) or QtCore.Qt.LeftButton
@@ -281,11 +289,14 @@ class PlotBox(QtWidgets.QFrame):
                               symbolBrush=None)
         self.plot.addItem(dot)                              # PlotDataItem: the plot applies its log axis itself
         self.clicked = self.describe(x, y)
-        label = pg.TextItem(self.clicked, color=colors["text"], anchor=(0, 1), fill=brush(colors["axes"], 0.85))
+        x_lo, x_hi = self.plot.vb.viewRange()[0]
+        right_half = x > 0.5 * (x_lo + x_hi)                # the label goes to the side with room
+        label = pg.TextItem(self.clicked, color=colors["text"], anchor=(1 if right_half else 0, 1),
+                            fill=brush(colors["axes"], 0.85))
         label.setPos(x, np.log10(y) if self.log_y and y > 0 else y)   # TextItem: view coordinates
         self.plot.addItem(label)
         self.mark_items = [dot, label]
-        self.readout.setText("<b>marked:</b> " + self.clicked)
+        self.marked.setText("<b>marked:</b> " + self.clicked)
 
 
 class PlotPanel(QtWidgets.QWidget):

@@ -82,34 +82,46 @@ class Material:
 
     def thickness(self, t):
         """Thickness at relative position t (a number or an array of numbers)."""
+
         if self.mode == "linear":
             return self.linear[0] + (self.linear[1] - self.linear[0]) * t
+        
         if self.mode == "poly":
             return np.polynomial.polynomial.polyval(t, self.poly)
+        
         values = self.user[::-1]                            # user values from the substrate (t = 0) up
+
         if values.size < 2:
             return (values[0] if values.size else 0.0) + 0.0 * np.asarray(t)
+        
         return np.interp(t, np.linspace(0.0, 1.0, values.size), values)
 
     def thicknesses(self, N):
         """Thickness array: one value per period, top period first. A user array of length N is used as it is;
         for any other N (and for the linear / polynomial laws) d(t) is sampled at t = 1 … 0."""
+
         if self.mode == "user" and self.user.size == N:
             return self.user.copy()
+        
         t = np.linspace(1.0, 0.0, N) if N > 1 else np.zeros(1)
+
         return np.asarray(self.thickness(t), dtype=float) * np.ones(N)
 
     def switch_to_poly(self):
         """Poly mode that starts from the current thicknesses: the straight line (c0 = d_start,
         c1 = d_end − d_start), or a least-squares fit of the user array."""
+
         degree = len(self.poly) - 1
         self.poly[:] = 0.0
+
         if self.mode == "user" and self.user.size > 1:
             t = np.linspace(1.0, 0.0, self.user.size)
             fit = np.polynomial.polynomial.polyfit(t, self.user, min(degree, self.user.size - 1))
             self.poly[:fit.size] = fit
+
         elif self.mode == "user":
             self.poly[0] = self.user[0] if self.user.size else 0.0
+
         else:
             self.poly[0] = self.linear[0]
             self.poly[1] = self.linear[1] - self.linear[0]
@@ -118,12 +130,14 @@ class Material:
     def switch_to_user(self, N):
         """User mode. A user array that is already there (e.g. from a file) is kept;
         otherwise it starts from the current thicknesses of the N periods."""
+
         if self.user.size == 0:
             self.user = np.maximum(self.thicknesses(N), 0.0)
         self.mode = "user"
 
     def set_degree(self, degree):
         """Change the polynomial degree, keeping the existing coefficients."""
+
         new_poly = np.zeros(degree + 1)
         n = min(len(self.poly), len(new_poly))
         new_poly[:n] = self.poly[:n]
@@ -139,8 +153,10 @@ REACH = (4.0, math.sqrt(3.0), 7.0)          # each step is complete (to ~3·10�
 
 def profile_weights(weights):
     """The weights [erf, lin, exp] made ≥ 0 and normalized to a sum of 1 (all zero -> pure erf)."""
-    w = np.clip(np.asarray(weights, dtype=float), 0.0, None)
-    return w / w.sum() if w.sum() > 0 else np.array([1.0, 0.0, 0.0])
+
+    clipped_weights = np.clip(np.asarray(weights, dtype=float), 0.0, None)
+
+    return clipped_weights / clipped_weights.sum() if clipped_weights.sum() > 0 else np.array([1.0, 0.0, 0.0])
 
 
 def step_fraction(x, sigma, weights):
@@ -155,41 +171,51 @@ def step_fraction(x, sigma, weights):
 
         F(x) = (w_erf·erf + w_lin·lin + w_exp·exp) / (w_erf + w_lin + w_exp)
     """
-    w = profile_weights(weights)
+    weights_normalize = profile_weights(weights)
+
     x = np.asarray(x, dtype=float)
     F = np.zeros(x.shape)
-    if w[0] > 0:
-        F += w[0] * 0.5 * (1.0 + erf(x / (math.sqrt(2.0) * sigma)))
-    if w[1] > 0:
-        F += w[1] * np.clip(0.5 + x / (math.sqrt(12.0) * sigma), 0.0, 1.0)
-    if w[2] > 0:
+
+    if weights_normalize[0] > 0:
+        F += weights_normalize[0] * 0.5 * (1.0 + erf(x / (math.sqrt(2.0) * sigma)))
+
+    if weights_normalize[1] > 0:
+        F += weights_normalize[1] * np.clip(0.5 + x / (math.sqrt(12.0) * sigma), 0.0, 1.0)
+
+    if weights_normalize[2] > 0:
         tail = 0.5 * np.exp(-math.sqrt(2.0) * np.abs(x) / sigma)
-        F += w[2] * np.where(x <= 0, tail, 1.0 - tail)
+        F += weights_normalize[2] * np.where(x <= 0, tail, 1.0 - tail)
+
     return F
 
 
-def profile_transform(Q2, sigma, weights):
+def interlayer_factor(Q_pow2, sigma, weights):
     """
     Fourier transform of the derivative of the mixed step (step_fraction) at wave vector Q, given Q² (may be
-    complex): how much of a boundary's sharp reflection survives the roughness.
+    complex): 
+    - how much of a boundary's sharp reflection survives the roughness.
+
         erf   exp(−Q²σ²/2)
         lin   sin(√3·σ·Q) / (√3·σ·Q)
         exp   1 / (1 + Q²σ²/2)
-    (Svechnikov 2020, Table 2, with Q = 2·kz.) The mix uses the same normalized weights as step_fraction:
-    the transform of a sum is the sum of the transforms.
+
     """
-    w = profile_weights(weights)
-    Q2 = np.asarray(Q2, dtype=complex)
-    result = np.zeros(Q2.shape, dtype=complex)
-    if w[0] > 0:
-        result += w[0] * np.exp(-Q2 * sigma**2 / 2.0)
-    if w[1] > 0:
-        u = math.sqrt(3.0) * sigma * np.sqrt(Q2)
+    weights_normalize = profile_weights(weights)
+    Q_pow2 = np.asarray(Q_pow2, dtype=complex)
+    interlayer_factor = np.zeros(Q_pow2.shape, dtype=complex)
+
+    if weights_normalize[0] > 0:
+        interlayer_factor += weights_normalize[0] * np.exp(-Q_pow2 * sigma**2 / 2.0)
+
+    if weights_normalize[1] > 0:
+        u = math.sqrt(3.0) * sigma * np.sqrt(Q_pow2)
         small = np.abs(u) < 1e-9
-        result += w[1] * np.where(small, 1.0, np.sin(u) / np.where(small, 1.0, u))
-    if w[2] > 0:
-        result += w[2] / (1.0 + Q2 * sigma**2 / 2.0)
-    return result
+        interlayer_factor += weights_normalize[1] * np.where(small, 1.0, np.sin(u) / np.where(small, 1.0, u))
+
+    if weights_normalize[2] > 0:
+        interlayer_factor += weights_normalize[2] / (1.0 + Q_pow2 * sigma**2 / 2.0)
+
+    return interlayer_factor
 
 
 def roughness_factors(kz_upper, kz_lower, sigma, weights):
@@ -202,15 +228,18 @@ def roughness_factors(kz_upper, kz_lower, sigma, weights):
     The transmission part matters below the critical edges (evanescent layers); without it (r only) R can
     even exceed 1 there.
     """
-    W = profile_transform(4.0 * kz_upper * kz_lower, sigma, weights)
-    T = 1.0 / profile_transform((kz_upper - kz_lower) ** 2, sigma, weights) ** 2
+    W = interlayer_factor(4.0 * kz_upper * kz_lower, sigma, weights)
+
+    T = 1.0 / interlayer_factor((kz_upper - kz_lower) ** 2, sigma, weights) ** 2
+    
     return W, T
 
 
 def reach(sigma, weights):
     """Distance from the boundary centre beyond which the mixed step is complete: the widest step used."""
-    w = profile_weights(weights)
-    return sigma * max(r for r, wk in zip(REACH, w) if wk > 0)
+    weights_normalize = profile_weights(weights)
+
+    return sigma * max(reach for reach, wk in zip(REACH, weights_normalize) if wk > 0)
 
 
 # ==============================================================================
@@ -256,14 +285,18 @@ class Interface:
     def thickness_factors(self, n_layers):
         """1 + e for each of the n layers (all 1 without errors); its own random stream, so chaos and the
         thickness errors do not change each other's realization."""
+
         if self.thickness_error <= 0:
             return np.ones(n_layers)
+        
         random = np.random.default_rng([self.seed, 1])
+
         if self.error_shape == "uniform":
-            e = random.uniform(-1.0, 1.0, n_layers)
+            error = random.uniform(-1.0, 1.0, n_layers)
         else:
-            e = random.standard_normal(n_layers)
-        return 1.0 + self.thickness_error * e
+            error = random.standard_normal(n_layers)
+
+        return 1.0 + self.thickness_error * error
 
     def n_slices(self, sigma_b, weights):
         """Number of slices across one transition of width σ_b and this profile (0 for a sharp boundary)."""
@@ -298,10 +331,15 @@ def build_stack(materials, N, ambient, substrate, interface, quantity="potential
        stays one slice. Total slices ≈ Σ over boundaries of n_slices + one per layer middle.
     """
     # ---- 1. sharp stack: value of every medium, depth, roughness and profile of every boundary ----
+
     values = [getattr(ambient, quantity)]
-    sigmas, shapes = [], []                                 # σ and profile of the upper boundary of each layer
+
+    sigmas, shapes = [], []
+                                     # σ and profile of the upper boundary of each layer
     layer_thickness = []
+
     thickness_arrays = [material.thicknesses(N) for material in materials]   # each: N values, top period first
+
     for period in range(N):                                 # from the ambient side down to the substrate
         for material, d in zip(materials, thickness_arrays):
             if d[period] <= 0:
@@ -310,7 +348,9 @@ def build_stack(materials, N, ambient, substrate, interface, quantity="potential
             shapes.append(material.profile)
             values.append(getattr(material, quantity))      # material.potential or material.epsilon
             layer_thickness.append(d[period])
+
     # the real thicknesses: ideal × (1 + random error); then the depth of every boundary
+
     layer_thickness = list(np.maximum(np.array(layer_thickness) * interface.thickness_factors(len(layer_thickness)), 0.0))
     boundaries = list(np.concatenate(([0.0], np.cumsum(layer_thickness))))   # top of each layer, then the substrate
     sigmas.append(substrate.sigma)
@@ -329,17 +369,22 @@ def build_stack(materials, N, ambient, substrate, interface, quantity="potential
     jumps = np.diff(values)                                 # jump of V (or ε) at every boundary
 
     # slice edges: all boundaries + n_slices(σ_b) equal slices across every rough transition
+
     edges = list(boundaries)
+
     for z_b, w, shape in zip(boundaries, widths, shapes):
         if w > 0:
             r = reach(w, shape)
             edges.extend(np.linspace(z_b - r, z_b + r, interface.n_slices(w, shape) + 1))
+
     edges = np.unique(np.round(edges, 6))
     centres = 0.5 * (edges[:-1] + edges[1:])
 
     # value at every slice centre: value_top + Σ jump_b · F((z − z_b)/σ_b)   (sharp boundary: plain step)
+
     smooth = np.full(centres.size, values[0], dtype=np.result_type(jumps, float))   # float for V, complex for ε
     passed = np.zeros(centres.size + 1, dtype=smooth.dtype) # steps that are complete from slice i on
+
     for z_b, w, shape, jump in zip(boundaries, widths, shapes, jumps):
         r = reach(w, shape)
         lo, hi = np.searchsorted(centres, [z_b - r, z_b + r])
@@ -350,6 +395,7 @@ def build_stack(materials, N, ambient, substrate, interface, quantity="potential
 
     values = np.concatenate(([values[0]], smooth, [values[-1]]))
     thicknesses = np.concatenate(([0.0], np.diff(edges), [0.0]))
+    
     return values, thicknesses, None
 
 
