@@ -82,7 +82,7 @@ class GradientDescent:
     """
 
     def __init__(self, materials, N, ambient, substrate, interface, q, q_top,
-                 step, step_decay, d_min, penalty_weight, h, beta1, beta2):
+                 step, step_decay, d_min, penalty_weight, h, beta1, beta2, **unused):
         self.materials = materials
         self.N = N
         self.ambient, self.substrate = ambient, substrate   # Material objects above and below the stack
@@ -176,12 +176,16 @@ class ArrayDescent:
     The roughness is taken by the "factor" method (sharp layers × roughness factors): the gradient is exact
     for it. Thicknesses never go below d_floor, so no layer disappears from the stack during the search.
     Thickness errors (Interface.thickness_error) are included: the real layer is ideal × (1 + e).
+
+    sort_layers = True: after every step each material's thicknesses are sorted, thinnest next to the substrate
+    and thickest at the top (the supermirror order); the Adam memory of every value moves with it.
     """
     name = "thickness of every layer"
 
     def __init__(self, materials, N, ambient, substrate, interface, q, q_top,
-                 step, step_decay, d_min, penalty_weight, beta1, beta2, d_floor=1.0, **unused):
+                 step, step_decay, d_min, penalty_weight, beta1, beta2, d_floor=1.0, sort_layers=True, **unused):
         self.materials = materials
+        self.sort_layers = sort_layers
         self.ambient, self.substrate = ambient, substrate
         self.interface = Interface(method="factor", slice_thickness=interface.slice_thickness, chaos=interface.chaos,
                                    seed=interface.seed, thickness_error=interface.thickness_error,
@@ -211,6 +215,8 @@ class ArrayDescent:
         for mat in self.materials:
             values = mat.thicknesses(N)
             mat.user = np.maximum(values, self.d_floor)
+            if self.sort_layers:
+                mat.user = np.sort(mat.user)[::-1]            # top period first: thickest on top
             mat.mode = "user"
         self.N = N
         self.iteration = 0
@@ -255,6 +261,11 @@ class ArrayDescent:
             avg_hat = avg / (1 - b1**self.iteration)
             avg_sq_hat = avg_sq / (1 - b2**self.iteration)
             mat.user = np.maximum(mat.user - step * avg_hat / (np.sqrt(avg_sq_hat) + 1e-12), self.d_floor)
+            if self.sort_layers:
+                order = np.argsort(-mat.user, kind="stable")  # thickest first = top; thinnest at the substrate
+                mat.user = mat.user[order]
+                avg[:] = avg[order]
+                avg_sq[:] = avg_sq[order]
 
 
 # ==============================================================================

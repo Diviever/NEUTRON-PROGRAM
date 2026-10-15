@@ -520,6 +520,9 @@ PARAMETERS = [
      "thickness of every layer: every element of each material's thickness array (user-determined mode) moves on its own, "
      "with the exact gradient from one extra pass of the recursion (roughness by the factor method). "
      "polynomial coefficients: few parameters d(t) = c0 + c1·t + …, gradient by finite differences"),
+    ("opt_order",      "Layer order",                ("thinner toward the substrate", "free"), None, None, None, None, "search",
+     "Only for 'thickness of every layer'. thinner toward the substrate: after every step each material's thicknesses "
+     "are sorted — thinnest next to the substrate, thickest at the top (supermirror order). free: every layer keeps its place"),
     ("growth",         "N growth ×",                 1.15,           1.01,    3.0,      0.05,    2,   "search",    "N is multiplied by this when a stage ends without reaching the target"),
     ("max_iter",       "Max iterations / N",         150,            5,       5000,     10,      0,   "search",    "Gradient-descent iterations allowed for one N"),
     ("step",           "Adam step (Å)",              2.0,            0.01,    50.0,     0.5,     2,   "search",    "How far every parameter (layer thickness or coefficient) moves in one iteration (at the start)"),
@@ -1398,7 +1401,8 @@ class MultilayerApp(QMainWindow):
                     self.q_values(q_top), q_top,
                     step=self.v("step"), step_decay=self.v("step_decay"),
                     d_min=self.v("d_min"), penalty_weight=self.v("penalty_weight"),
-                    h=self.v("h"), beta1=self.v("beta1"), beta2=self.v("beta2"))
+                    h=self.v("h"), beta1=self.v("beta1"), beta2=self.v("beta2"),
+                    sort_layers=self.v("opt_order").startswith("thinner"))
         self.running = True
         self.set_inputs_enabled(False)
         self.opt_started = time.time()
