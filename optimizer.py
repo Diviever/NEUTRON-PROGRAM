@@ -6,6 +6,7 @@ optimizer.py — supermirror optimizer (no GUI code)
     GradientDescent           changes material.poly IN PLACE to raise ⟨R⟩ on 0 … m·q_c (few parameters)
     ArrayDescent              changes material.user IN PLACE: the thickness of every single layer is a parameter;
                               exact gradient of ⟨R⟩ for all of them from one extra pass (calculation.parratt)
+    group_thicknesses(d, %)   layers of nearly the same thickness -> one common thickness (their median)
     optimize(...)             the full search: gradient descent at N, then larger N, until ⟨R⟩ ≥ target
 
 Every structure is evaluated with calculation.build_stack() and calculation.neutron_reflectivity().
@@ -161,6 +162,36 @@ class GradientDescent:
 
 
 # ==============================================================================
+# Groups of layers with nearly the same thickness
+# ==============================================================================
+def group_thicknesses(d, handicap_percent):
+    """
+    Walks along the array d: the first layer opens a group, every following layer whose thickness differs
+    from the first one by less than handicap_percent % of the first one joins it. All layers of the group get
+    the median thickness of the group, and the first layer that did not fit opens the next group.
+    handicap_percent = 0 leaves d unchanged.
+    """
+    d = np.array(d, dtype=float)
+    if handicap_percent <= 0:
+        return d
+    first = 0
+    while first < d.size:
+        limit = handicap_percent / 100.0 * d[first]
+        last = first + 1
+        while last < d.size and abs(d[last] - d[first]) < limit:
+            last += 1
+        d[first:last] = np.median(d[first:last])
+        first = last
+    return d
+
+
+def count_groups(d):
+    """Number of different thicknesses in d (runs of equal neighbouring values count once)."""
+    d = np.asarray(d, dtype=float)
+    return int(1 + np.count_nonzero(np.diff(d))) if d.size else 0
+
+
+# ==============================================================================
 # Gradient descent (Adam) on the thickness of every layer (user-determined arrays)
 # ==============================================================================
 class ArrayDescent:
@@ -179,13 +210,16 @@ class ArrayDescent:
 
     sort_layers = True: after every step each material's thicknesses are sorted, thinnest next to the substrate
     and thickest at the top (the supermirror order); the Adam memory of every value moves with it.
+    group_handicap (%) > 0: after that, neighbouring layers of nearly the same thickness are made equal
+    (group_thicknesses), so the structure needs fewer different thicknesses.
     """
     name = "thickness of every layer"
 
     def __init__(self, materials, N, ambient, substrate, interface, q, q_top,
-                 step, step_decay, d_min, penalty_weight, beta1, beta2, d_floor=1.0, sort_layers=True, **unused):
+                 step, step_decay, d_min, penalty_weight, beta1, beta2, d_floor=1.0, sort_layers=True, group_handicap=0.0, **unused):
         self.materials = materials
         self.sort_layers = sort_layers
+        self.group_handicap = group_handicap                # %
         self.ambient, self.substrate = ambient, substrate
         self.interface = Interface(method="factor", slice_thickness=interface.slice_thickness, chaos=interface.chaos,
                                    seed=interface.seed, thickness_error=interface.thickness_error,
@@ -217,6 +251,7 @@ class ArrayDescent:
             mat.user = np.maximum(values, self.d_floor)
             if self.sort_layers:
                 mat.user = np.sort(mat.user)[::-1]            # top period first: thickest on top
+            mat.user = group_thicknesses(mat.user, self.group_handicap)
             mat.mode = "user"
         self.N = N
         self.iteration = 0
@@ -266,6 +301,7 @@ class ArrayDescent:
                 mat.user = mat.user[order]
                 avg[:] = avg[order]
                 avg_sq[:] = avg_sq[order]
+            mat.user = group_thicknesses(mat.user, self.group_handicap)
 
 
 # ==============================================================================

@@ -46,7 +46,8 @@ from calculation import (Material, Interface, build_stack, neutron_reflectivity,
                          critical_q, xray_critical_q, q_grid, mean_reflectivity,
                          energy_from_k, k_from_energy, glancing_angle, q_from_angle, H_OVER_M,
                          xray_wavelength, xray_energy)
-from optimizer import M_REFERENCE, reference_for_m, hayter_mook_start, GradientDescent, ArrayDescent, optimize
+from optimizer import (M_REFERENCE, reference_for_m, hayter_mook_start, GradientDescent, ArrayDescent, optimize,
+                       count_groups)
 from gui_style import THEMES, colors
 from plots import PlotPanel, MiniPlot, framed, style_plot, DASH, DOT
 from structure_file import (LIBRARY_DIR, load_library, sheet_names, read_layers, periodic_materials,
@@ -523,6 +524,10 @@ PARAMETERS = [
     ("opt_order",      "Layer order",                ("thinner toward the substrate", "free"), None, None, None, None, "search",
      "Only for 'thickness of every layer'. thinner toward the substrate: after every step each material's thicknesses "
      "are sorted — thinnest next to the substrate, thickest at the top (supermirror order). free: every layer keeps its place"),
+    ("group_handicap", "Group handicap (%)",         5.0,            0.0,     50.0,     0.5,     1,   "search",
+     "Only for 'thickness of every layer'. After every step (and after sorting) each material's layers are grouped from the top: "
+     "the first layer opens a group, the following layers that differ from it by less than this % of its thickness join it, "
+     "all get the median thickness of the group, the next layer opens a new group. 0 = no grouping"),
     ("growth",         "N growth ×",                 1.15,           1.01,    3.0,      0.05,    2,   "search",    "N is multiplied by this when a stage ends without reaching the target"),
     ("max_iter",       "Max iterations / N",         150,            5,       5000,     10,      0,   "search",    "Gradient-descent iterations allowed for one N"),
     ("step",           "Adam step (Å)",              2.0,            0.01,    50.0,     0.5,     2,   "search",    "How far every parameter (layer thickness or coefficient) moves in one iteration (at the start)"),
@@ -1402,7 +1407,8 @@ class MultilayerApp(QMainWindow):
                     step=self.v("step"), step_decay=self.v("step_decay"),
                     d_min=self.v("d_min"), penalty_weight=self.v("penalty_weight"),
                     h=self.v("h"), beta1=self.v("beta1"), beta2=self.v("beta2"),
-                    sort_layers=self.v("opt_order").startswith("thinner"))
+                    sort_layers=self.v("opt_order").startswith("thinner"),
+                    group_handicap=self.v("group_handicap"))
         self.running = True
         self.set_inputs_enabled(False)
         self.opt_started = time.time()
@@ -1420,7 +1426,10 @@ class MultilayerApp(QMainWindow):
                 "stopped": "■ Stopped — best result of the current N kept"}[status]
         self.lbl_status.setText(f"{head}: N = {gd.N} ({gd.N * len(self.materials)} layers), "
                                 f"⟨R⟩ = {self.mean_R:.4f} (target {self.v('target'):.3f}), "
-                                f"{time.time() - self.opt_started:.0f} s, optimized: {gd.name}.")
+                                f"{time.time() - self.opt_started:.0f} s, optimized: {gd.name}"
+                                + (", different thicknesses: " + ", ".join(f"{mat.name} {count_groups(mat.user)}"
+                                                                          for mat in self.materials)
+                                   if isinstance(gd, ArrayDescent) else "") + ".")
 
     def on_optimizer_step(self, N, iteration, mean_R, best_R):
         """Called by optimize() every iteration. Returns False when Stop was pressed."""
