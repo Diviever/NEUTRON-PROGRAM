@@ -499,7 +499,6 @@ PARAMETERS = [
     ("q_min",          "q min (Å⁻¹)",                0.001,          1e-4,    0.1,      0.001,   4,   "plot",      "Lowest q of the calculation grid"),
     ("q_max_factor",   "q max / (m·q_c)",            1.3,            1.0,     50.0,     0.1,     2,   "plot",      "Highest q of the grid, as a multiple of the target edge m·q_c"),
     ("q_points",       "q points",                   800,            50,      20000,    50,      0,   "plot",      "Number of q values (plots and optimizer use the same grid)"),
-    ("edge_fraction",  "Edge window from (× m·q_c)", 0.95,           0.5,     0.999,    0.01,    3,   "plot",      "'R near m·q_c' = mean R between this fraction of m·q_c and m·q_c"),
     ("R_scale",        "R axis",                     ("log", "linear"), None, None,   None,    None, "plot",      "Reflectivity axis: logarithmic or linear"),
     ("log_decades",    "Log range (decades)",        9,              1,       30,       1,       0,   "plot",      "Log axis: R is shown from its maximum down to its minimum, but at most this many decades"),
     ("z_pad",          "Vacuum / substrate shown (Å)", 50.0,         0.0,     10000.0,  10.0,    0,   "plot",      "Width of vacuum and substrate drawn in the V(z) plot"),
@@ -1329,8 +1328,6 @@ class MultilayerApp(QMainWindow):
         band = (np.percentile(R_all, 16, axis=0), np.percentile(R_all, 84, axis=0)) if n_real > 1 else None
         band_x = (np.percentile(R_x_all, 16, axis=0), np.percentile(R_x_all, 84, axis=0)) if n_real > 1 else None
         curve_label = "Parratt" if n_real == 1 else f"mean of {n_real} random structures"
-        near_edge = q >= self.v("edge_fraction") * q_top
-        edge_R = mean_reflectivity(R[near_edge], q[near_edge], q_top)
         ok = self.mean_R >= target
         densest = max(self.materials, key=lambda mat: 1.0 - mat.epsilon.real)
         q_cx = xray_critical_q(densest.epsilon, wavelength)
@@ -1364,7 +1361,7 @@ class MultilayerApp(QMainWindow):
                    f"Neutrons · E = {self.v('energy'):.3f} meV · N = {N} ({n_layers} layers)<br>"
                    f"⟨R⟩(0…m·q<sub>c,Ni</sub>) = {self.mean_R:.4f}"
                    + (f" ± {spread:.4f}" if n_real > 1 else "") + f" {'✓' if ok else '✗'} (target {target:.3f})<br>"
-                   f"RMS deviation from target = {rms_text} · R near m·q<sub>c</sub> ≈ {edge_R:.3f}"
+                   f"RMS deviation from target = {rms_text}"
                    + (f" · {n_real} random structures, thickness error {self.v('thick_error'):g} %" if n_real > 1 else ""),
                    Q_LABEL, "Reflectivity <i>R</i>")
         panel.place_legend(a, "lower left" if log_scale else "upper right")
