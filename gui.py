@@ -54,6 +54,7 @@ from structure_file import (LIBRARY_DIR, load_library, sheet_names, read_layers,
                             read_thickness_file, read_xy)
 
 MAX_DEGREE = 6
+NI_POTENTIAL = 0.2410  # µeV, the nickel reference for the supermirror m value
 
 # Default X-ray permittivities at Cu Kα1 (λ = 1.540562 Å, 8.048 keV): ε = (1 − δ + iβ)², with
 # δ, β = (r_e λ² / 2π)·n_atoms·(f1, f2), f1 = Z + f′, f2 = f″ (International Tables Vol. C, Cu Kα1)
@@ -525,9 +526,11 @@ PARAMETERS = [
      "Only for 'thickness of every layer'. thinner toward the substrate: after every step each material's thicknesses "
      "are sorted — thinnest next to the substrate, thickest at the top (supermirror order). free: every layer keeps its place"),
     ("group_handicap", "Group handicap (%)",         5.0,            0.0,     50.0,     0.5,     1,   "search",
-     "Only for 'thickness of every layer'. After every step (and after sorting) each material's layers are grouped from the top: "
+     "Only for 'thickness of every layer'. The target and final result use a grouped copy of the working thicknesses. "
+     "For each material the grouping starts from the top: "
      "the first layer opens a group, the following layers that differ from it by less than this % of its thickness join it, "
-     "all get the median thickness of the group, the next layer opens a new group. 0 = no grouping"),
+     "all get the median thickness of the group, the next layer opens a new group. The plot shows the working layers "
+     "while the search is running. 0 = no grouping"),
     ("growth",         "N growth ×",                 1.15,           1.01,    3.0,      0.05,    2,   "search",    "N is multiplied by this when a stage ends without reaching the target"),
     ("max_iter",       "Max iterations / N",         150,            5,       5000,     10,      0,   "search",    "Gradient-descent iterations allowed for one N"),
     ("step",           "Adam step (Å)",              2.0,            0.01,    50.0,     0.5,     2,   "search",    "How far every parameter (layer thickness or coefficient) moves in one iteration (at the start)"),
@@ -583,6 +586,7 @@ class MultilayerApp(QMainWindow):
         self.m = 2.0                                         # supermirror m
         self.running = False                                 # True while the optimizer loop runs
         self.mean_R = 0.0                                    # ⟨R⟩ of the structure shown in the plot
+        self.rms_R = float("nan")                            # RMS deviation of the plotted curve from the target
         self.calc_seconds = 0.0                              # duration of the last plot update
         self.measured = {"xray": None, "neutron": None}      # measured curves: (file name, x[], y[]) or None
         self.native_style = QApplication.style().objectName() or "Fusion"   # Qt style of the light theme (the system one)
@@ -617,6 +621,7 @@ class MultilayerApp(QMainWindow):
 
         run_row = QHBoxLayout()
         self.btn_start = QPushButton("▶ Start optimization")
+        self.btn_start.setToolTip("Start each material at the mean thickness of its layers in the current structure")
         self.btn_start.clicked.connect(lambda: self.start_optimization())
         self.btn_stop = QPushButton("■ Stop")
         self.btn_stop.setEnabled(False)
@@ -668,7 +673,7 @@ class MultilayerApp(QMainWindow):
                 changed.connect(self.schedule_update)
 
         # default structure: Ni / Ti, linear thickness laws
-        self.add_material(Material("Ni", 0.2410, linear=(40.0, 200.0), epsilon=EPS_NI, sigma=3.0))
+        self.add_material(Material("Ni", NI_POTENTIAL, linear=(40.0, 200.0), epsilon=EPS_NI, sigma=3.0))
         self.add_material(Material("Ti", -0.0490, linear=(40.0, 200.0), epsilon=EPS_TI, sigma=3.0))
         self.on_m_changed(self.v("m"))
         self.apply_theme()
@@ -844,7 +849,7 @@ class MultilayerApp(QMainWindow):
         self.add_full_row(grid, self.lbl_reference)
         layout.addWidget(box)
         box, grid = self.build_group("search")
-        btn_hm = QPushButton("Hayter–Mook start profile")
+        btn_hm = QPushButton("Apply Hayter–Mook profile")
         btn_hm.setToolTip("Set all materials to a q⁴-law supermirror profile for the current m")
         btn_hm.clicked.connect(lambda: self.set_hayter_mook())
         self.add_full_row(grid, btn_hm)
@@ -1207,12 +1212,9 @@ class MultilayerApp(QMainWindow):
 
     # ------------------------------------------------------------------ target
     def target_edge(self):
-        """(q_c, q_top = m·q_c, name) — q_c of the material with the highest potential."""
-        if not self.materials:
-            return 0.0215, 0.0215 * self.m, "Ni"
-        top = max(self.materials, key=lambda mat: mat.potential)
-        q_c = critical_q(top.potential) if top.potential > 0 else 0.0215
-        return q_c, self.m * q_c, top.name
+        """Reference critical q and target edge m·q_c, both based on nickel."""
+        q_c = critical_q(NI_POTENTIAL)
+        return q_c, self.m * q_c, "Ni"
 
     def on_m_changed(self, value):
         self.m = float(value)
@@ -1322,6 +1324,8 @@ class MultilayerApp(QMainWindow):
         means = [mean_reflectivity(r, q, q_top) for r in R_all]
         self.mean_R, spread = float(np.mean(means)), float(np.std(means))
         R, R_x = R_all.mean(axis=0), R_x_all.mean(axis=0)         # one structure: its curve; several: the mean curve
+        self.rms_R = np.sqrt(mean_reflectivity((R - target) ** 2, q, q_top))
+        rms_text = f"{self.rms_R:.4f}" if np.isfinite(self.rms_R) else "—"
         band = (np.percentile(R_all, 16, axis=0), np.percentile(R_all, 84, axis=0)) if n_real > 1 else None
         band_x = (np.percentile(R_x_all, 16, axis=0), np.percentile(R_x_all, 84, axis=0)) if n_real > 1 else None
         curve_label = "Parratt" if n_real == 1 else f"mean of {n_real} random structures"
@@ -1358,9 +1362,9 @@ class MultilayerApp(QMainWindow):
         n_layers = sum(int(np.sum(m.thicknesses(N) > 0)) for m in self.materials)     # layers really in the stack
         style_plot(a, colors["axes"],
                    f"Neutrons · E = {self.v('energy'):.3f} meV · N = {N} ({n_layers} layers)<br>"
-                   f"⟨R⟩(0…m·q<sub>c</sub>) = {self.mean_R:.4f}"
+                   f"⟨R⟩(0…m·q<sub>c,Ni</sub>) = {self.mean_R:.4f}"
                    + (f" ± {spread:.4f}" if n_real > 1 else "") + f" {'✓' if ok else '✗'} (target {target:.3f})<br>"
-                   f"R near m·q<sub>c</sub> ≈ {edge_R:.3f}"
+                   f"RMS deviation from target = {rms_text} · R near m·q<sub>c</sub> ≈ {edge_R:.3f}"
                    + (f" · {n_real} random structures, thickness error {self.v('thick_error'):g} %" if n_real > 1 else ""),
                    Q_LABEL, "Reflectivity <i>R</i>")
         panel.place_legend(a, "lower left" if log_scale else "upper right")
@@ -1398,12 +1402,29 @@ class MultilayerApp(QMainWindow):
     def start_optimization(self):
         if not self.materials or self.running:
             return
-        q_c, q_top, _ = self.target_edge()
+        _, q_top, _ = self.target_edge()
+        q = self.q_values(q_top)
+        if not np.any(q <= q_top):
+            self.lbl_status.setText("No q points in the target range. Lower q min before starting optimization.")
+            return
+
+        current_N = self.v("N")
         N_start = self.v("N_start")
         method = ArrayDescent if self.v("opt_params").startswith("thickness") else GradientDescent
+        for material in self.materials:
+            thicknesses = material.thicknesses(current_N)
+            layers = thicknesses[thicknesses > 0]  # Nonpositive entries are absent from the stack.
+            mean_thickness = layers.mean() if layers.size else 0.0
+            if method is ArrayDescent:
+                material.user = np.full(N_start, mean_thickness)
+                material.mode = "user"
+            else:
+                material.poly.fill(0.0)
+                material.poly[0] = mean_thickness
+                material.mode = "poly"
         gd = method(self.materials, N_start,
                     self.ambient(), self.substrate(), self.interface(),
-                    self.q_values(q_top), q_top,
+                    q, q_top,
                     step=self.v("step"), step_decay=self.v("step_decay"),
                     d_min=self.v("d_min"), penalty_weight=self.v("penalty_weight"),
                     h=self.v("h"), beta1=self.v("beta1"), beta2=self.v("beta2"),
@@ -1426,6 +1447,7 @@ class MultilayerApp(QMainWindow):
                 "stopped": "■ Stopped — best result of the current N kept"}[status]
         self.lbl_status.setText(f"{head}: N = {gd.N} ({gd.N * len(self.materials)} layers), "
                                 f"⟨R⟩ = {self.mean_R:.4f} (target {self.v('target'):.3f}), "
+                                f"RMS deviation from target = {self.rms_R:.4f}, "
                                 f"{time.time() - self.opt_started:.0f} s, optimized: {gd.name}"
                                 + (", different thicknesses: " + ", ".join(f"{mat.name} {count_groups(mat.user)}"
                                                                           for mat in self.materials)
@@ -1433,8 +1455,10 @@ class MultilayerApp(QMainWindow):
 
     def on_optimizer_step(self, N, iteration, mean_R, best_R):
         """Called by optimize() every iteration. Returns False when Stop was pressed."""
+        grouped = self.v("opt_params").startswith("thickness") and self.v("group_handicap") > 0
+        metric = "Grouped ⟨R⟩" if grouped else "⟨R⟩"
         self.lbl_status.setText(
-            f"N = {N} ({N * len(self.materials)} layers) · iteration {iteration} · ⟨R⟩ = {mean_R:.4f} "
+            f"N = {N} ({N * len(self.materials)} layers) · iteration {iteration} · {metric} = {mean_R:.4f} "
             f"(best at this N {best_R:.4f}) → target {self.v('target'):.3f} · "
             f"{time.time() - self.opt_started:.0f} s")
         # redraw entries and plots now and then (a redraw takes as long as one reflectivity calculation)

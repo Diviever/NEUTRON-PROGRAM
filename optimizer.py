@@ -11,6 +11,7 @@ optimizer.py — supermirror optimizer (no GUI code)
 
 Every structure is evaluated with calculation.build_stack() and calculation.neutron_reflectivity().
 """
+from copy import copy
 import math
 
 import numpy as np
@@ -210,8 +211,8 @@ class ArrayDescent:
 
     sort_layers = True: after every step each material's thicknesses are sorted, thinnest next to the substrate
     and thickest at the top (the supermirror order); the Adam memory of every value moves with it.
-    group_handicap (%) > 0: after that, neighbouring layers of nearly the same thickness are made equal
-    (group_thicknesses), so the structure needs fewer different thicknesses.
+    group_handicap (%) > 0: evaluate a grouped copy of the individual thicknesses for the target and the
+    final result. Adam continues updating the individual thicknesses so a group can split over several steps.
     """
     name = "thickness of every layer"
 
@@ -251,7 +252,6 @@ class ArrayDescent:
             mat.user = np.maximum(values, self.d_floor)
             if self.sort_layers:
                 mat.user = np.sort(mat.user)[::-1]            # top period first: thickest on top
-            mat.user = group_thicknesses(mat.user, self.group_handicap)
             mat.mode = "user"
         self.N = N
         self.iteration = 0
@@ -282,6 +282,16 @@ class ArrayDescent:
     def loss(self):
         return self.loss_and_gradient()[0]
 
+    def grouped_result(self):
+        """Reflectivity and thickness arrays of the grouped candidate, leaving Adam's arrays intact."""
+        materials = [copy(mat) for mat in self.materials]
+        for mat in materials:
+            mat.user = group_thicknesses(mat.user, self.group_handicap)
+        potentials, thicknesses, roughness = build_stack(materials, self.N, self.ambient, self.substrate,
+                                                         self.interface)
+        R = neutron_reflectivity(potentials, thicknesses, self.q, roughness)
+        return mean_reflectivity(R, self.q, self.q_top), [mat.user for mat in materials]
+
     def make_step(self, loss_now=None):
         """One Adam step on all thicknesses."""
         mean_R = self.mean_R
@@ -301,7 +311,6 @@ class ArrayDescent:
                 mat.user = mat.user[order]
                 avg[:] = avg[order]
                 avg_sq[:] = avg_sq[order]
-            mat.user = group_thicknesses(mat.user, self.group_handicap)
 
 
 # ==============================================================================
@@ -314,40 +323,50 @@ def optimize(gd, target, N_start, N_max, growth, max_iter, patience, min_gain, o
        turns every material into a thickness array of N values (in set_N).
     1. Gradient descent at the current N until ⟨R⟩ ≥ target (done), or until ⟨R⟩ has not
        improved by more than min_gain for `patience` iterations, or max_iter iterations are used.
-    2. Otherwise keep the best parameters of this N, increase N (× growth) and go to 1
-       (arrays are interpolated to the new N).
+    2. Otherwise increase N (× growth) and carry the working profile to the new stage.
+       Array thicknesses are interpolated to the new N.
 
+    With grouping, the target and reported reflectivity use a grouped copy. Improvements of either
+    the grouped or the working structure count toward patience, and the returned structure is grouped.
     on_step(N, iteration, mean_R, best_R) is called every iteration (GUI refresh);
     returning False stops the search.
     Returns "success", "n_max" or "stopped". The result is left in the materials and in gd.N.
     """
     gd.prepare()
     gd.set_N(N_start)
+    use_groups = isinstance(gd, ArrayDescent) and gd.group_handicap > 0
 
     while True:
         best_R, best, no_gain = -1.0, None, 0
+        best_working_R = -1.0
         status = "next N"
         for iteration in range(1, max_iter + 1):
             loss_now = gd.loss()
-            if gd.mean_R > best_R + min_gain:
-                best_R, best, no_gain = gd.mean_R, gd.snapshot(), 0
-            else:
-                no_gain += 1
+            mean_R, grouped = gd.grouped_result() if use_groups else (gd.mean_R, None)
+            improved = mean_R > best_R + min_gain
+            working_improved = use_groups and gd.mean_R > best_working_R + min_gain
+            if improved:
+                best_R = mean_R
+                best = grouped if use_groups else gd.snapshot()
+            if working_improved:
+                best_working_R = gd.mean_R
+            no_gain = 0 if improved or working_improved else no_gain + 1
 
-            if not on_step(gd.N, iteration, gd.mean_R, best_R):
+            if not on_step(gd.N, iteration, mean_R, best_R):
                 status = "stopped"
                 break
-            if gd.mean_R >= target:
+            if mean_R >= target:
+                if use_groups:
+                    gd.restore(grouped)
+                gd.mean_R = mean_R
                 return "success"
-            if no_gain >= patience:
+            if no_gain >= patience or iteration == max_iter:
                 break
             gd.make_step(loss_now)
 
-        gd.restore(best)                                         # keep the best parameters of this N
-        if status == "stopped":
-            return "stopped"
-
         next_N = max(gd.N + 1, math.ceil(gd.N * growth))
-        if next_N > N_max:
-            return "n_max"
+        if status == "stopped" or next_N > N_max:
+            gd.restore(best)
+            gd.mean_R = best_R
+            return "stopped" if status == "stopped" else "n_max"
         gd.set_N(next_N)
