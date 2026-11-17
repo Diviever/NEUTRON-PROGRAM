@@ -25,7 +25,7 @@ import numpy as np
 try:
     from PyQt6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-        QPushButton, QLabel, QSpinBox, QDoubleSpinBox, QGroupBox, QSplitter,
+        QPushButton, QLabel, QSpinBox, QDoubleSpinBox, QGroupBox, QSizePolicy,
         QScrollArea, QFrame, QLineEdit, QComboBox, QStackedWidget,
         QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView, QFileDialog, QAbstractItemView
     )
@@ -34,7 +34,7 @@ try:
 except ImportError:
     from PyQt5.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-        QPushButton, QLabel, QSpinBox, QDoubleSpinBox, QGroupBox, QSplitter,
+        QPushButton, QLabel, QSpinBox, QDoubleSpinBox, QGroupBox, QSizePolicy,
         QScrollArea, QFrame, QLineEdit, QComboBox, QStackedWidget,
         QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView, QFileDialog, QAbstractItemView
     )
@@ -55,6 +55,7 @@ from structure_file import (LIBRARY_DIR, load_library, sheet_names, read_layers,
 
 MAX_DEGREE = 6
 NI_POTENTIAL = 0.2410  # µeV, the nickel reference for the supermirror m value
+want_display_xray = True
 
 # Default X-ray permittivities at Cu Kα1 (λ = 1.540562 Å, 8.048 keV): ε = (1 − δ + iβ)², with
 # δ, β = (r_e λ² / 2π)·n_atoms·(f1, f2), f1 = Z + f′, f2 = f″ (International Tables Vol. C, Cu Kα1)
@@ -79,6 +80,13 @@ def safe_float(text, default):
         return float(str(text).strip().replace(',', '.'))
     except ValueError:
         return default
+
+
+def parse_thicknesses(text):
+    values = [safe_float(token, None) for token in text.replace(";", " ").split()]
+    if values and all(value is not None and np.isfinite(value) for value in values):
+        return np.array(values)
+    return None
 
 
 def qenum(owner, group, name):
@@ -300,9 +308,21 @@ class LayerCard(QFrame):
         hint.setWordWrap(True)
         uv.addWidget(hint)
         self.ed_user = QLineEdit()
+        self.ed_user.setMaxLength(1_000_000)                # room for arrays up to 20,000 periods
         self.ed_user.setToolTip("Values separated by spaces or ';'. With N equal to their number they are used as they are, "
                                 "for another N they are interpolated.")
         uv.addWidget(self.ed_user)
+        clipboard_row = QHBoxLayout()
+        copy_button = QPushButton("Copy")
+        copy_button.setToolTip("Copy all thickness values in this field")
+        copy_button.clicked.connect(self.copy_thicknesses)
+        clipboard_row.addWidget(copy_button)
+        paste_button = QPushButton("Paste")
+        paste_button.setToolTip("Replace all thickness values with the numbers from the clipboard (Å)")
+        paste_button.clicked.connect(self.paste_thicknesses)
+        clipboard_row.addWidget(paste_button)
+        clipboard_row.addStretch(1)
+        uv.addLayout(clipboard_row)
         self.user_drop = DropZone("Drop an .xlsx with this material's thicknesses (nm)")
         self.user_drop.setMinimumHeight(40)
         self.user_drop.file_dropped.connect(lambda path: self.file_dropped.emit(self, path))
@@ -328,7 +348,7 @@ class LayerCard(QFrame):
         for entry in [self.ed_pot, self.ed_eps_re, self.ed_eps_im, self.ed_sigma,
                       self.ed_start, self.ed_end] + self.profile_edits + self.coef_edits:
             entry.valueChanged.connect(self.read_entries)
-        self.ed_user.textChanged.connect(self.read_entries)
+        self.ed_user.textChanged.connect(self.read_user_thicknesses)
         self.cmb_name.editTextChanged.connect(self.read_entries)
         self.cmb_name.activated.connect(self.on_library_choice)
         self.cmb_mode.currentIndexChanged.connect(self.on_mode_changed)
@@ -380,11 +400,31 @@ class LayerCard(QFrame):
         mat.linear[1] = self.ed_end.value()
         for k in range(len(mat.poly)):
             mat.poly[k] = self.coef_edits[k].value()
-        user = [safe_float(x, None) for x in self.ed_user.text().replace(";", " ").split()]
-        if user and None not in user:
-            mat.user = np.array(user)
         self.draw_graph()
         self.changed.emit()
+
+    def read_user_thicknesses(self, text):
+        if self._showing:
+            return
+        values = parse_thicknesses(text)
+        if values is not None:
+            self.material.user = values
+            self.draw_graph()
+            self.changed.emit()
+
+    def copy_thicknesses(self):
+        QApplication.clipboard().setText(self.ed_user.text())
+
+    def paste_thicknesses(self):
+        text = " ".join(QApplication.clipboard().text().split())
+        if len(text) > self.ed_user.maxLength():
+            self.lbl_user.setText("The clipboard contents are too long for this field.")
+        elif parse_thicknesses(text) is None:
+            self.lbl_user.setText("The clipboard must contain a list of thicknesses in Å.")
+        elif text == self.ed_user.text():
+            self.draw_graph()
+        else:
+            self.ed_user.setText(text)
 
     def on_mode_changed(self, index):
         if self._showing:
@@ -598,16 +638,23 @@ class MultilayerApp(QMainWindow):
 
         central = QWidget()
         self.setCentralWidget(central)
-        main_layout = QHBoxLayout(central)
+        main_layout = QGridLayout(central)
         main_layout.setContentsMargins(8, 8, 8, 8)
-        splitter = QSplitter(qenum(Qt, 'Orientation', 'Horizontal'))
-        main_layout.addWidget(splitter)
+        main_layout.setSpacing(6)
+        for column in range(3):
+            main_layout.setColumnStretch(column, 1)
+        main_layout.setRowStretch(1, 1)
+        main_layout.setRowStretch(2, 1)
+        ignored = qenum(QSizePolicy, 'Policy', 'Ignored')
+        preferred = qenum(QSizePolicy, 'Policy', 'Preferred')
 
         # ---- left: tabs + run controls ----
         left = QWidget()
+        left.setSizePolicy(ignored, preferred)
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
         self.tabs = QTabWidget()
+        self.tabs.setUsesScrollButtons(True)
         self.library = {}                                    # material library: {name: (potential, ε)}
         self.file_path = None                                # structure file currently loaded
         self.sheets = []                                     # its sheet names
@@ -615,12 +662,15 @@ class MultilayerApp(QMainWindow):
                       self.build_optimizer_tab(), self.build_reference_tab()]
         for page, title in zip(self.pages, ["Structure", "File && library", "Beams && plots", "Optimizer",
                                             "Reference table"]):
-            self.tabs.addTab(page, title)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setWidget(page)
+            self.tabs.addTab(scroll, title)
         left_layout.addWidget(self.tabs, 1)
 
         run_row = QHBoxLayout()
-        self.btn_start = QPushButton("▶ Start optimization")
-        self.btn_start.setToolTip("Start each material at the mean thickness of its layers in the current structure")
+        self.btn_start = QPushButton("▶ Start")
+        self.btn_start.setToolTip("Start optimization from the mean thickness of each material in the current structure")
         self.btn_start.clicked.connect(lambda: self.start_optimization())
         self.btn_stop = QPushButton("■ Stop")
         self.btn_stop.setEnabled(False)
@@ -632,24 +682,40 @@ class MultilayerApp(QMainWindow):
         self.lbl_status.setObjectName("OptStatus")
         self.lbl_status.setWordWrap(True)
         left_layout.addWidget(self.lbl_status)
-        splitter.addWidget(left)
+        main_layout.addWidget(left, 0, 0, 4, 1)
 
         # ---- right: plots ----
-        right = QWidget()
-        right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        self.plots = PlotPanel()                             # X-ray column: R(q), ε(z) · neutron column: R(q), V(z)
-        right_layout.addWidget(self.plots)
+        self.plots = PlotPanel(main_layout, first_column=1, first_row=1)  # X-ray first, neutron second
+        self.btn_xray = QPushButton()
+        self.btn_xray.setFixedWidth(28)
+        self.btn_xray.clicked.connect(lambda: self.set_xray_display(not want_display_xray))
+        main_layout.addWidget(self.btn_xray, 0, 1, alignment=qenum(Qt, 'AlignmentFlag', 'AlignHCenter'))
+        self.set_xray_display(want_display_xray)
+
+        copy_controls = QWidget()
+        copy_controls.setSizePolicy(ignored, preferred)
+        copy_row = QHBoxLayout(copy_controls)
+        copy_row.setContentsMargins(0, 0, 0, 0)
+        copy_row.addStretch(1)
+        self.btn_copy_mean = QPushButton("Copy ⟨R⟩")
+        self.btn_copy_mean.setToolTip("Copy the mean neutron reflectivity shown on the plot")
+        self.btn_copy_mean.clicked.connect(lambda: QApplication.clipboard().setText(f"{self.mean_R:.4f}"))
+        self.btn_copy_mean.setEnabled(False)
+        copy_row.addWidget(self.btn_copy_mean)
+        self.btn_copy_rms = QPushButton("Copy RMS")
+        self.btn_copy_rms.setToolTip("Copy the RMS deviation from the target shown on the plot")
+        self.btn_copy_rms.clicked.connect(lambda: QApplication.clipboard().setText(f"{self.rms_R:.4f}"))
+        self.btn_copy_rms.setEnabled(False)
+        copy_row.addWidget(self.btn_copy_rms)
+        copy_row.addStretch(1)
+        main_layout.addWidget(copy_controls, 0, 2)
+
         hint = QLabel("Plots: mouse position under each plot · left-click = mark the curve value · drag = move · "
                       "wheel = zoom (over an axis: that axis only) · right-click = View All / Export (PNG, SVG, CSV) · "
                       "'A' corner button = full view again")
         hint.setObjectName("Formula")
         hint.setWordWrap(True)
-        right_layout.addWidget(hint)
-        splitter.addWidget(right)
-        splitter.setStretchFactor(0, 1)                      # settings 1/3, the two plot columns 2/3
-        splitter.setStretchFactor(1, 2)
-        splitter.setSizes([1000, 2000])
+        main_layout.addWidget(hint, 3, 1, 1, 2)
 
         # ---- connections of the parameter entries (special handlers first, then the redraw) ----
         self.params["N"].valueChanged.connect(self.on_repeats_changed)
@@ -692,12 +758,13 @@ class MultilayerApp(QMainWindow):
         widget.blockSignals(False)
 
     def build_group(self, group):
-        """Group box with the entries of all PARAMETERS rows of this group, two per row."""
+        """Group box with one label and one entry per row for the narrow settings column."""
         box = QGroupBox(GROUP_TITLES[group])
         box.setToolTip(GROUP_NOTES.get(group, ""))
         grid = QGridLayout(box)
         grid.setHorizontalSpacing(6)
         grid.setVerticalSpacing(3)
+        grid.setColumnStretch(0, 1)
         rows = [p for p in PARAMETERS if p[7] == group]
         for i, (key, label, start, lo, hi, step, dec, _, tip) in enumerate(rows):
             if isinstance(start, tuple):
@@ -719,13 +786,13 @@ class MultilayerApp(QMainWindow):
             text = QLabel(label + ":")
             text.setToolTip(tip)
             text.setWordWrap(True)
-            grid.addWidget(text, i // 2, 2 * (i % 2))
-            grid.addWidget(widget, i // 2, 2 * (i % 2) + 1)
+            grid.addWidget(text, i, 0)
+            grid.addWidget(widget, i, 1)
             self.params[key] = widget
         return box, grid
 
     def add_full_row(self, grid, widget):
-        grid.addWidget(widget, grid.rowCount(), 0, 1, 4)
+        grid.addWidget(widget, grid.rowCount(), 0, 1, 2)
 
     # ------------------------------------------------------------------ tabs
     def build_structure_tab(self):
@@ -758,7 +825,7 @@ class MultilayerApp(QMainWindow):
         self.cmb_sheet = QComboBox()
         self.cmb_sheet.currentIndexChanged.connect(lambda *_: self.load_sheet())
         row.addWidget(self.cmb_sheet, 1)
-        grid.addLayout(row, grid.rowCount(), 0, 1, 4)
+        grid.addLayout(row, grid.rowCount(), 0, 1, 2)
         self.lbl_file = QLabel("No file loaded. The rows become the distinct materials in table order, each with its "
                                "thickness in every period (neighbouring equal rows are merged); N = number of periods.")
         self.lbl_file.setObjectName("Formula")
@@ -774,19 +841,19 @@ class MultilayerApp(QMainWindow):
         self.lib_table.horizontalHeader().setSectionResizeMode(qenum(QHeaderView, 'ResizeMode', 'Stretch'))
         self.lib_table.setEditTriggers(qenum(QAbstractItemView, 'EditTrigger', 'NoEditTriggers'))
         lib.addWidget(self.lib_table, 1)
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Ambient:"))
+        media = QGridLayout()
+        media.addWidget(QLabel("Ambient:"), 0, 0)
         self.cmb_ambient = QComboBox()
         self.cmb_ambient.currentIndexChanged.connect(lambda *_: self.use_library_medium("ambient"))
-        row.addWidget(self.cmb_ambient, 1)
-        row.addWidget(QLabel("Substrate:"))
+        media.addWidget(self.cmb_ambient, 0, 1)
+        media.addWidget(QLabel("Substrate:"), 1, 0)
         self.cmb_substrate = QComboBox()
         self.cmb_substrate.currentIndexChanged.connect(lambda *_: self.use_library_medium("substrate"))
-        row.addWidget(self.cmb_substrate, 1)
+        media.addWidget(self.cmb_substrate, 1, 1)
         btn_reload = QPushButton("Reload library")
         btn_reload.clicked.connect(lambda: self.reload_library())
-        row.addWidget(btn_reload)
-        lib.addLayout(row)
+        media.addWidget(btn_reload, 2, 0, 1, 2)
+        lib.addLayout(media)
         layout.addWidget(box, 1)
         return page
 
@@ -808,7 +875,7 @@ class MultilayerApp(QMainWindow):
         box, _ = self.build_group("plot")
         layout.addWidget(box)
         box, grid = self.build_group("data")
-        columns = QHBoxLayout()
+        measured_controls = QVBoxLayout()
         self.data_labels = {}
         for which, title in (("xray", "X-ray"), ("neutron", "neutron")):
             column = QVBoxLayout()
@@ -816,24 +883,27 @@ class MultilayerApp(QMainWindow):
             zone.setMinimumHeight(55)
             zone.file_dropped.connect(lambda path, w=which: self.load_measured(w, path))
             column.addWidget(zone)
-            buttons = QHBoxLayout()
-            for text, action, tip in (("Browse…", self.browse_measured, "Choose the file"),
-                                      ("Fit q range", self.fit_q_to_measured, "Extend the q axis of this plot to the last measured point"),
-                                      ("1-count background", self.background_from_measured,
-                                       "Set this plot's background to the smallest measured value above 0 (one detector count)"),
-                                      ("Clear", self.clear_measured, "Remove the measured points from the plot")):
+            buttons = QGridLayout()
+            actions = (
+                ("Browse…", self.browse_measured, "Choose the file"),
+                ("Fit q range", self.fit_q_to_measured, "Extend the q axis to the last measured point"),
+                ("Set background", self.background_from_measured,
+                 "Set the background to the smallest measured value above 0 (one detector count)"),
+                ("Clear", self.clear_measured, "Remove the measured points from the plot"),
+            )
+            for i, (text, action, tip) in enumerate(actions):
                 button = QPushButton(text)
                 button.setToolTip(tip)
                 button.clicked.connect(lambda _=False, a=action, w=which: a(w))
-                buttons.addWidget(button)
+                buttons.addWidget(button, i // 2, i % 2)
             column.addLayout(buttons)
             label = QLabel("No file.")
             label.setObjectName("Formula")
             label.setWordWrap(True)
             column.addWidget(label)
             self.data_labels[which] = label
-            columns.addLayout(column)
-        grid.addLayout(columns, grid.rowCount(), 0, 1, 4)
+            measured_controls.addLayout(column)
+        grid.addLayout(measured_controls, grid.rowCount(), 0, 1, 2)
         layout.addWidget(box)
         layout.addStretch(1)
         return page
@@ -877,7 +947,8 @@ class MultilayerApp(QMainWindow):
         buttons = QHBoxLayout()
         btn_add = QPushButton("+ Add row")
         btn_add.clicked.connect(lambda: self.append_reference_row(["", "", "", ""]))
-        btn_del = QPushButton("− Remove selected row")
+        btn_del = QPushButton("− Remove row")
+        btn_del.setToolTip("Remove the selected row")
         btn_del.clicked.connect(lambda: self.remove_reference_row())
         buttons.addWidget(btn_add)
         buttons.addWidget(btn_del)
@@ -891,8 +962,8 @@ class MultilayerApp(QMainWindow):
         box = QGroupBox("Materials of the period")
         layout = QVBoxLayout(box)
         scroll = QScrollArea()
+        scroll.setMinimumHeight(220)                        # keep the card editor usable inside the tab scroll area
         scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(qenum(Qt, 'ScrollBarPolicy', 'ScrollBarAlwaysOff'))
         container = QWidget()
         container.setObjectName("CardsContainer")
         self.cards_layout = QVBoxLayout(container)
@@ -902,9 +973,11 @@ class MultilayerApp(QMainWindow):
         scroll.setWidget(container)
         layout.addWidget(scroll)
         buttons = QHBoxLayout()
-        btn_add = QPushButton("+ Add Material")
+        btn_add = QPushButton("+ Add")
+        btn_add.setToolTip("Add a material")
         btn_add.clicked.connect(lambda: self.add_material(Material("Layer", 0.100, linear=(50.0, 50.0), sigma=3.0)))
-        btn_del = QPushButton("- Remove Last Material")
+        btn_del = QPushButton("− Remove last")
+        btn_del.setToolTip("Remove the last material")
         btn_del.clicked.connect(lambda: self.remove_card(self.cards[-1]) if self.cards else None)
         buttons.addWidget(btn_add)
         buttons.addWidget(btn_del)
@@ -1285,22 +1358,43 @@ class MultilayerApp(QMainWindow):
         return q_grid(q_top, self.v("q_min"), self.v("q_max_factor"), self.v("q_points"))
 
     # ------------------------------------------------------------------ calculation + plots
+    def set_xray_display(self, visible):
+        global want_display_xray
+        want_display_xray = visible
+        self.centralWidget().layout().setColumnStretch(1, int(visible))
+        for plot in (self.plots.xray, self.plots.epsilon):
+            self.plots.box_of[plot].setVisible(visible)
+        self.lbl_xray.setVisible(visible)
+        self.data_labels["xray"].setVisible(visible)
+        self.btn_xray.setText("−" if visible else "+")
+        action = "Hide X-ray plots and pause calculation" if visible else "Show X-ray plots and resume calculation"
+        self.btn_xray.setToolTip(action)
+        self.btn_xray.setAccessibleName(action)
+        self.schedule_update()
+
     def schedule_update(self, *_):
         self.calc_timer.start()
 
     def update_calculation(self):
         started = time.time()
-        self.plots.clear_all()
+        self.plots.clear_all(include_xray=want_display_xray)
         if not self.materials:
+            self.btn_copy_mean.setEnabled(False)
+            self.btn_copy_rms.setEnabled(False)
             return
 
-        # ---- q grids of both plots; they decide the largest slice thickness ----
+        # ---- The visible plots' q grids set the largest slice thickness. ----
         N = self.v("N")
         target = self.v("target")
         q_c, q_top, qc_name = self.target_edge()
         q = self.q_values(q_top)
-        q_x = np.linspace(self.v("q_min"), self.v("xq_max"), self.v("xq_points"))
-        q_highest = max(q[-1], q_x[-1])
+        q_highest = max(q[0], q[-1])
+        if want_display_xray:
+            q_x = np.linspace(self.v("q_min"), self.v("xq_max"), self.v("xq_points"))
+            q_highest = max(q_highest, q_x[-1])
+            wavelength = self.v("lambda_x")
+            polarization = self.v("polarization")
+            R_x_all = []
         d_max = self.limit_slice_thickness(q_highest)
         interface = self.interface()
         random_parts = self.v("thick_error") > 0 or self.v("chaos") > 0
@@ -1308,43 +1402,38 @@ class MultilayerApp(QMainWindow):
 
         # ---- every random structure (seed, seed+1, …): METHOD 1 + METHOD 2.1 / 2.2 (the optimizer's calls) ----
         k = self.v("k")
-        wavelength = self.v("lambda_x")
-        k_x = 2 * np.pi / wavelength
         ambient, substrate = self.ambient(), self.substrate()
-        R_all, R_x_all = [], []
+        R_all = []
         for i in range(n_real):
             it = self.interface(seed=self.v("seed") + i)
             potentials, thicknesses, roughness = build_stack(self.materials, N, ambient, substrate, it)
             R_all.append(neutron_reflectivity(potentials, thicknesses, q, roughness))
-            epsilons, thicknesses_x, roughness_x = build_stack(self.materials, N, ambient, substrate, it, quantity="epsilon")
-            R_x_all.append(xray_reflectivity(epsilons, thicknesses_x, q_x, wavelength, self.v("polarization"), roughness_x))
+            if want_display_xray:
+                epsilons, thicknesses_x, roughness_x = build_stack(self.materials, N, ambient, substrate, it,
+                                                                  quantity="epsilon")
+                R_x_all.append(xray_reflectivity(epsilons, thicknesses_x, q_x, wavelength, polarization, roughness_x))
         n_steps = len(potentials) - 2                        # layers or slices the reflectivity went through
-        R_all, R_x_all = np.array(R_all), np.array(R_x_all)
+        R_all = np.array(R_all)
         means = [mean_reflectivity(r, q, q_top) for r in R_all]
         self.mean_R, spread = float(np.mean(means)), float(np.std(means))
-        R, R_x = R_all.mean(axis=0), R_x_all.mean(axis=0)         # one structure: its curve; several: the mean curve
+        R = R_all.mean(axis=0)                               # one structure: its curve; several: the mean curve
         self.rms_R = np.sqrt(mean_reflectivity((R - target) ** 2, q, q_top))
+        self.btn_copy_mean.setEnabled(bool(np.isfinite(self.mean_R)))
+        self.btn_copy_rms.setEnabled(bool(np.isfinite(self.rms_R)))
         rms_text = f"{self.rms_R:.4f}" if np.isfinite(self.rms_R) else "—"
         band = (np.percentile(R_all, 16, axis=0), np.percentile(R_all, 84, axis=0)) if n_real > 1 else None
-        band_x = (np.percentile(R_x_all, 16, axis=0), np.percentile(R_x_all, 84, axis=0)) if n_real > 1 else None
         curve_label = "Parratt" if n_real == 1 else f"mean of {n_real} random structures"
         ok = self.mean_R >= target
-        densest = max(self.materials, key=lambda mat: 1.0 - mat.epsilon.real)
-        q_cx = xray_critical_q(densest.epsilon, wavelength)
 
         # ---- beam info lines ----
         theta_c, theta_top = glancing_angle(q_c, k), glancing_angle(q_top, k)
         self.lbl_beam.setText(
             f"λ = {2 * np.pi / k:.3f} Å   ·   v = {H_OVER_M * k / (2 * np.pi):.1f} m/s\n"
             f"θ_c {qc_name} = {theta_c:.3f}°   ·   θ at m·q_c = {theta_top:.3f}°")
-        self.lbl_xray.setText(
-            f"k = {k_x:.4f} Å⁻¹   ·   θ_c {densest.name} = {glancing_angle(q_cx, k_x):.3f}° "
-            f"(q_c = {q_cx:.4f} Å⁻¹)   ·   θ at q max = {glancing_angle(q_x[-1], k_x):.2f}°")
 
         # ---- measured curves converted to q (None when no file is loaded) ----
-        measured_n, measured_x = self.measured_curve("neutron"), self.measured_curve("xray")
+        measured_n = self.measured_curve("neutron")
         self.show_measured_info("neutron", measured_n, q[-1])
-        self.show_measured_info("xray", measured_x, q_x[-1])
 
         # ---- neutron R(q) ----
         panel, log_scale, decades = self.plots, self.v("R_scale") == "log", self.v("log_decades")
@@ -1366,28 +1455,40 @@ class MultilayerApp(QMainWindow):
                    Q_LABEL, "Reflectivity <i>R</i>")
         panel.place_legend(a, "lower left" if log_scale else "upper right")
 
-        # ---- X-ray R(q) ----
-        a = panel.xray
-        panel.draw_reflectivity(a, q_x, R_x, k_x, colors["xray"], log_scale, decades, self.v("xray_background"),
-                                measured_x, self.measured["xray"] and self.measured["xray"][0], band_x, curve_label)
-        panel.add_vline(a, q_cx, colors["q_c"], DASH, f"{densest.name} q<sub>c</sub> ({q_cx:.4f} Å⁻¹)")
-        style_plot(a, colors["axes"],
-                   f"X-rays · λ = {wavelength:.4f} Å ({self.v('E_x'):.3f} keV)<br>"
-                   f"{self.v('polarization')}-polarization · same structure, ε from the cards", Q_LABEL, "Reflectivity <i>R</i>")
-        panel.place_legend(a, "upper right")
-
-        # ---- depth profiles: the graded (rough) profile of the first structure (seed) ----
+        # ---- Graded neutron depth profile of the first structure (seed). ----
         potentials, thicknesses, _ = build_stack(self.materials, N, ambient, substrate, interface, graded=True)
-        epsilons, _, _ = build_stack(self.materials, N, ambient, substrate, interface, quantity="epsilon", graded=True)
         self.lbl_slices.setText(self.slicing_summary(interface, d_max, q_highest))
         panel.draw_profile(panel.potential, potentials, thicknesses, self.v("z_pad"), colors["potential"], ("V", "µeV"))
         how = (f"{n_steps} slices" if interface.method == "slices" else
                f"{n_steps} sharp layers × roughness factors · graded profile shown")
         style_plot(panel.potential, colors["axes"], f"Neutron potential <i>V</i>(z)<br>{how}",
                    Z_LABEL, "Potential <i>V</i> (µeV)")
-        panel.draw_profile(panel.epsilon, (1.0 - epsilons.real) * 1e5, thicknesses, self.v("z_pad"), colors["epsilon"],
-                           ("(1 − Re ε)·10⁵", ""))
-        style_plot(panel.epsilon, colors["axes"], "X-ray permittivity: 1 − Re ε(z)", Z_LABEL, "(1 − Re ε) × 10<sup>5</sup>")
+
+        if want_display_xray:
+            k_x = 2 * np.pi / wavelength
+            densest = max(self.materials, key=lambda mat: 1.0 - mat.epsilon.real)
+            q_cx = xray_critical_q(densest.epsilon, wavelength)
+            self.lbl_xray.setText(
+                f"k = {k_x:.4f} Å⁻¹   ·   θ_c {densest.name} = {glancing_angle(q_cx, k_x):.3f}° "
+                f"(q_c = {q_cx:.4f} Å⁻¹)   ·   θ at q max = {glancing_angle(q_x[-1], k_x):.2f}°")
+            measured_x = self.measured_curve("xray")
+            self.show_measured_info("xray", measured_x, q_x[-1])
+            R_x_all = np.array(R_x_all)
+            band_x = tuple(np.percentile(R_x_all, (16, 84), axis=0)) if n_real > 1 else None
+            a = panel.xray
+            panel.draw_reflectivity(a, q_x, R_x_all.mean(axis=0), k_x, colors["xray"], log_scale, decades,
+                                    self.v("xray_background"), measured_x, self.measured["xray"] and self.measured["xray"][0],
+                                    band_x, curve_label)
+            panel.add_vline(a, q_cx, colors["q_c"], DASH, f"{densest.name} q<sub>c</sub> ({q_cx:.4f} Å⁻¹)")
+            style_plot(a, colors["axes"],
+                       f"X-rays · λ = {wavelength:.4f} Å ({self.v('E_x'):.3f} keV)<br>"
+                       f"{polarization}-polarization · same structure, ε from the cards", Q_LABEL, "Reflectivity <i>R</i>")
+            panel.place_legend(a, "upper right")
+            epsilons, thicknesses_x, _ = build_stack(self.materials, N, ambient, substrate, interface,
+                                                     quantity="epsilon", graded=True)
+            panel.draw_profile(panel.epsilon, (1.0 - epsilons.real) * 1e5, thicknesses_x, self.v("z_pad"),
+                               colors["epsilon"], ("(1 − Re ε)·10⁵", ""))
+            style_plot(panel.epsilon, colors["axes"], "X-ray permittivity: 1 − Re ε(z)", Z_LABEL, "(1 − Re ε) × 10<sup>5</sup>")
         self.calc_seconds = time.time() - started
 
     # ------------------------------------------------------------------ optimizer

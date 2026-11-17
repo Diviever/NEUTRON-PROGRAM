@@ -299,17 +299,15 @@ class PlotBox(QtWidgets.QFrame):
         self.marked.setText("<b>marked:</b> " + self.clicked)
 
 
-class PlotPanel(QtWidgets.QWidget):
+class PlotPanel:
     """Two columns of outlined plot boxes: X-ray R(q) over 1 − Re ε(z), neutron R(q) over V(z)."""
 
-    def __init__(self):
-        super().__init__()
-        grid = QtWidgets.QGridLayout(self)
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.setSpacing(6)
+    def __init__(self, grid, first_column, first_row=0):
+        policies = getattr(QtWidgets.QSizePolicy, "Policy", QtWidgets.QSizePolicy)
         self.boxes = [PlotBox(AngleAxis()), PlotBox(), PlotBox(AngleAxis()), PlotBox()]
         for box, (row, col) in zip(self.boxes, ((0, 0), (1, 0), (0, 1), (1, 1))):
-            grid.addWidget(box, row, col)
+            box.setSizePolicy(policies.Ignored, policies.Preferred)
+            grid.addWidget(box, first_row + row, first_column + col)
         self.xray, self.epsilon, self.neutron, self.potential = (box.plot for box in self.boxes)
         self.box_of = {box.plot: box for box in self.boxes}
         for plot in (self.xray, self.epsilon, self.neutron, self.potential):
@@ -329,11 +327,14 @@ class PlotPanel(QtWidgets.QWidget):
         for box in self.boxes:
             box.apply_theme()
 
-    def clear_all(self):
-        for plot in (self.neutron, self.xray, self.potential, self.epsilon):
+    def clear_all(self, include_xray=True):
+        plots = (self.neutron, self.potential)
+        if include_xray:
+            plots += (self.xray, self.epsilon)
+        for plot in plots:
             plot.clear()
-        for legend in self.legends.values():
-            legend.clear()
+            if plot in self.legends:
+                self.legends[plot].clear()
 
     # ---- R(q) ----
     def draw_reflectivity(self, plot, q, R, k, color, log_scale, log_decades, background=0.0,
